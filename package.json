@@ -1,0 +1,11 @@
+{
+  "name": "qian-labor-desktop-workspace",
+  "private": true,
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "test": "pnpm --dir apps/desktop test",
+    "lint": "pnpm --dir apps/desktop lint",
+    "typecheck": "pnpm --dir apps/desktop typecheck",
+    "build:web": "pnpm --dir apps/desktop build"
+  }
+}
