@@ -1,0 +1,23 @@
+[package]
+name = "qian-labor-desktop"
+version = "0.1.0"
+description = "企安用工 Desktop"
+authors = ["aimuu076166"]
+edition = "2021"
+
+[lib]
+name = "qian_labor_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+tokio = { version = "1", features = ["time"] }
