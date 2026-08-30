@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the existing Desktop-only product and validation layers unchanged. Add one standard-library Python scanner that traverses ref/HEAD-reachable text blobs and message objects, neutralizes Git history overlays, rejects incomplete traversal state, and shares credential-pattern definitions with the current-tree scanner; add regression tests for security and build configuration; commit Cargo's lockfile; pin the validated Rust toolchain; and extend the existing GitHub Actions workflow without adding services or product behavior.
 
-**Tech Stack:** Python 3.12 and pytest, Git plumbing commands, Rust/Cargo 1.98.0 with rustfmt, pnpm 10, Tauri 2, GitHub Actions, GitHub pull-request and branch-rule APIs.
+**Tech Stack:** Python 3.12 and pytest, Git plumbing commands, Rust/Cargo 1.98.0 with rustfmt, pnpm 9.15.0, Tauri 2, GitHub Actions, GitHub pull-request and branch-rule APIs.
 
 **Spec:** `docs/superpowers/specs/2026-08-27-qian-labor-desktop-architecture-design.md`
 
@@ -156,7 +156,7 @@ Expected: exit 0.
 
 Run: `pnpm install --frozen-lockfile`
 
-Run: `pnpm --filter @qian-labor/desktop test`
+Run: `pnpm --dir apps/desktop test -- --run`
 
 Run: `python/.venv/bin/python -m pytest -q python/tests`
 

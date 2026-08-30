@@ -92,7 +92,7 @@ API Key 不得：
 - Node.js 22；
 - pnpm 9.15.0；
 - Python 3.12；
-- Rust 1.98.0 是当前已验证的候选固定工具链，仍待新的三平台 CI 结果确认；
+- Rust 1.98.0（已由 Linux、macOS ARM64 和 Windows x64 CI 验证）；
 - 对应平台的 Tauri 构建依赖。
 
 ## 安装和验证
