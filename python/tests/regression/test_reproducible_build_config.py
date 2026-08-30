@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -10,6 +11,40 @@ ROOT = Path(__file__).resolve().parents[3]
 MANIFEST = ROOT / "apps" / "desktop" / "src-tauri" / "Cargo.toml"
 LOCKFILE = MANIFEST.with_name("Cargo.lock")
 TOOLCHAIN = ROOT / "rust-toolchain.toml"
+WORKFLOW = ROOT / ".github" / "workflows" / "desktop-ci.yml"
+
+
+def _workflow_job_blocks() -> dict[str, str]:
+    """Return the YAML job mappings without letting another job satisfy a gate."""
+    lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+    jobs_start = next(index for index, line in enumerate(lines) if line == "jobs:")
+    jobs: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in lines[jobs_start + 1 :]:
+        match = re.fullmatch(r"  ([a-z0-9-]+):", line)
+        if match:
+            current = match.group(1)
+            jobs[current] = [line]
+        elif current is not None:
+            jobs[current].append(line)
+    return {name: "\n".join(block) for name, block in jobs.items()}
+
+
+def _run_steps(job: str) -> list[str]:
+    """Parse each six-space YAML step so ordering checks apply to one job."""
+    steps: list[list[str]] = []
+    for line in job.splitlines():
+        if line.startswith("      - "):
+            steps.append([line])
+        elif steps:
+            steps[-1].append(line)
+    return ["\n".join(step) for step in steps]
+
+
+def _step_containing(steps: list[str], fragment: str) -> tuple[int, str]:
+    matching = [(index, step) for index, step in enumerate(steps) if fragment in step]
+    assert len(matching) == 1, f"expected one step containing {fragment!r}, got {matching!r}"
+    return matching[0]
 
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -86,3 +121,79 @@ def test_desktop_rust_release_inputs_are_tracked_and_resolvable() -> None:
     assert toolchain["channel"] == "1.98.0"
     assert toolchain["profile"] == "minimal"
     assert toolchain["components"] == ["rustfmt"]
+
+
+def test_desktop_ci_enforces_locked_builds_and_complete_history_security() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "permissions:\n  contents: read\n" in workflow
+    jobs = _workflow_job_blocks()
+    assert set(jobs) == {
+        "frontend",
+        "python-sidecar",
+        "tauri-rust",
+        "macos-arm64-build",
+        "windows-x64-build",
+        "public-history-security",
+    }
+
+    history = jobs["public-history-security"]
+    assert "    runs-on: ubuntu-24.04" in history
+    history_steps = _run_steps(history)
+    _, checkout = _step_containing(history_steps, "uses: actions/checkout@v4")
+    assert "fetch-depth: 0" in checkout
+    assert "persist-credentials: false" in checkout
+    _, python_setup = _step_containing(history_steps, "uses: actions/setup-python@v5")
+    assert 'python-version: "3.12"' in python_setup
+    _step_containing(
+        history_steps,
+        "python -m pytest -q python/tests/regression/test_public_history_scan.py",
+    )
+    _step_containing(history_steps, "python scripts/scan_public_history.py --repo .")
+    assert "secrets." not in history
+
+    sidecar_steps = _run_steps(jobs["python-sidecar"])
+    for command in (
+        "python scripts/scan_sensitive.py",
+        "pytest python/tests -q",
+        "python scripts/verify_desktop.py",
+        "python scripts/real_provider_smoke.py",
+        "python -m compileall -q python/src python/tests scripts",
+    ):
+        _step_containing(sidecar_steps, command)
+    _, smoke = _step_containing(sidecar_steps, "python scripts/real_provider_smoke.py")
+    for key in (
+        "AI_API_KEY",
+        "ZAI_API_KEY",
+        "ZHIPU_API_KEY",
+        "BIGMODEL_API_KEY",
+        "REAL_PROVIDER_SMOKE_API_KEY",
+        "PII_HASH_PEPPER",
+        "REAL_PROVIDER_SMOKE_PII_HASH_PEPPER",
+    ):
+        assert f'{key}: ""' in smoke
+
+    rust_jobs = ("tauri-rust", "macos-arm64-build", "windows-x64-build")
+    for name in rust_jobs:
+        steps = _run_steps(jobs[name])
+        _, toolchain = _step_containing(steps, "uses: dtolnay/rust-toolchain@stable")
+        assert "toolchain: 1.98.0" in toolchain
+        assert "components: rustfmt" in toolchain
+        for step in steps:
+            if "cargo test" in step or "cargo check" in step:
+                assert "--locked" in step, f"{name} must lock direct Cargo verification: {step}"
+
+    fmt_steps = _run_steps(jobs["tauri-rust"])
+    _step_containing(
+        fmt_steps,
+        "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all --check",
+    )
+
+    for name in ("macos-arm64-build", "windows-x64-build"):
+        steps = _run_steps(jobs[name])
+        package_index, package = _step_containing(
+            steps, "pnpm --dir apps/desktop tauri build --debug --no-bundle"
+        )
+        assert "-- --locked" in package
+        assert steps[package_index + 1] == (
+            "      - run: git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock"
+        )

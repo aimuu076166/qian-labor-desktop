@@ -47,6 +47,7 @@ jobs:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e './python[test]'
+      - run: python -m compileall -q python/src python/tests scripts
       - run: python scripts/scan_sensitive.py
       - run: pytest python/tests -q
       - run: python scripts/verify_desktop.py
@@ -72,10 +73,14 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt
       - run: python -m pip install -e './python[build]'
       - run: python scripts/build_sidecar.py
-      - run: cd apps/desktop/src-tauri && cargo test
-      - run: cd apps/desktop/src-tauri && cargo check
+      - run: cd apps/desktop/src-tauri && cargo test --locked
+      - run: cd apps/desktop/src-tauri && cargo check --locked
+      - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all --check
 
   macos-arm64-build:
     if: >-
@@ -95,14 +100,18 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt
       - name: Verify Apple Silicon runner
         run: >-
           python -c "import subprocess; value=subprocess.check_output(['rustc','--print','host-tuple'], text=True).strip(); assert value == 'aarch64-apple-darwin', value; print('MACOS_ARM64_RUNNER=PASS')"
       - run: python -m pip install -e './python[build]'
       - run: python scripts/build_sidecar.py
       - run: pnpm install --frozen-lockfile
-      - run: cd apps/desktop/src-tauri && cargo test
-      - run: pnpm --dir apps/desktop tauri build --debug --no-bundle
+      - run: cd apps/desktop/src-tauri && cargo test --locked
+      - run: pnpm --dir apps/desktop tauri build --debug --no-bundle -- --locked
+      - run: git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock
       - run: echo 'MACOS_ARM64_BUILD=PASS'
 
   windows-x64-build:
@@ -123,12 +132,29 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt
       - name: Verify Windows x64 runner
         run: >-
           python -c "import subprocess; value=subprocess.check_output(['rustc','--print','host-tuple'], text=True).strip(); assert value == 'x86_64-pc-windows-msvc', value; print('WINDOWS_X64_RUNNER=PASS')"
       - run: python -m pip install -e './python[build]'
       - run: python scripts/build_sidecar.py
       - run: pnpm install --frozen-lockfile
-      - run: cd apps/desktop/src-tauri && cargo test
-      - run: pnpm --dir apps/desktop tauri build --debug --no-bundle
+      - run: cd apps/desktop/src-tauri && cargo test --locked
+      - run: pnpm --dir apps/desktop tauri build --debug --no-bundle -- --locked
+      - run: git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock
       - run: echo 'WINDOWS_X64_BUILD=PASS'
+
+  public-history-security:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pytest -q python/tests/regression/test_public_history_scan.py
+      - run: python scripts/scan_public_history.py --repo .
