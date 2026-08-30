@@ -41,3 +41,12 @@ def test_lowercase_python_setting_is_not_treated_as_an_env_assignment() -> None:
     source = b'    ai_api_key="synthetic-zhipu-key-never-real",'
 
     assert pattern.search(source) is None
+
+
+def test_lowercase_python_setting_with_real_key_shape_is_detected() -> None:
+    scan = _load_scan_module()
+    pattern = scan.PATTERNS["ZHIPU_KEY_ASSIGNMENT"]
+
+    source = b'    ai_api_key="1234567890abcdef.abcdefghijklmnopqrstuvwxyz012345",'
+
+    assert pattern.search(source) is not None
