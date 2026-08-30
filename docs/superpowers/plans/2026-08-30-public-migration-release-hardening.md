@@ -33,9 +33,9 @@
 - Modify: `python/tests/regression/test_sensitive_scan.py`
 
 - [ ] Extract the existing high-confidence provider credential regexes and binary-content predicate into `scripts/sensitive_patterns.py`; retain current placeholder and synthetic-fixture exclusions and keep one authoritative pattern source for both scanners.
-- [ ] Add tests that construct temporary Git repositories and synthetic credential strings only at runtime. Cover a clean repository; a credential in the current committed tree; a credential deleted by a later commit; a credential in a commit message; a credential in an annotated-tag message; permitted placeholder and synthetic examples; binary content; duplicate blobs; a shallow clone; a non-Git directory; and a missing repository path.
-- [ ] Assert the public interface exactly: exit 0 and `PUBLIC_HISTORY_SENSITIVE_SCAN=PASS` for a clean complete history; exit 1 with `PUBLIC_HISTORY_SENSITIVE_SCAN_FAIL=<PATTERN>:<SHORT_OID>:<PATH_OR_COMMIT_MESSAGE>` findings for detected credentials; and exit 2 with a stable `PUBLIC_HISTORY_SENSITIVE_SCAN=ERROR` plus a non-secret reason code for incomplete or invalid inputs.
-- [ ] Assert that captured stdout and stderr never contain the dynamically assembled credential, even on Git failures, and that identical blob object IDs are scanned/reported at most once.
+- [ ] Add tests that construct temporary Git repositories and synthetic credential strings only at runtime. Cover a clean repository; a credential in the current committed tree; a credential deleted by a later commit; a credential reachable only from a secondary ref; a credential in a commit message; a credential in an annotated-tag message; permitted placeholder and synthetic examples; binary content; duplicate blobs; a shallow clone; a non-Git directory; and a missing repository path.
+- [ ] Assert the public interface exactly: exit 0 and `PUBLIC_HISTORY_SENSITIVE_SCAN=PASS` for a clean complete history; exit 1 with `PUBLIC_HISTORY_SENSITIVE_SCAN_FAIL=<PATTERN>:<SHORT_OID>:<PATH_OR_COMMIT_MESSAGE>` findings for detected credentials; and exit 2 with `PUBLIC_HISTORY_SENSITIVE_SCAN=FAIL` plus a stable non-secret `REASON=...` code for incomplete or invalid inputs.
+- [ ] Assert that captured stdout and stderr never contain the dynamically assembled credential, even on Git failures or in a credential-shaped/control-character filename, and that identical blob object IDs are scanned/reported at most once.
 - [ ] Run the focused new test file before implementation and record the expected failure caused by the missing scanner.
 
 Run: `python/.venv/bin/python -m pytest -q python/tests/regression/test_public_history_scan.py`
@@ -56,7 +56,7 @@ Run: `python/.venv/bin/python scripts/scan_sensitive.py .`
 
 Expected: `SENSITIVE_SCAN=PASS` and exit 0.
 
-Run: `python/.venv/bin/python scripts/scan_public_history.py .`
+Run: `python/.venv/bin/python scripts/scan_public_history.py --repo .`
 
 Expected: `PUBLIC_HISTORY_SENSITIVE_SCAN=PASS` and exit 0.
 
@@ -117,7 +117,7 @@ Commit: `build(rust): lock desktop dependencies and toolchain`
 - Modify: `README.md`
 - Modify: `python/tests/regression/test_reproducible_build_config.py`
 
-- [ ] Add a separate `public-history-security` job with `actions/checkout@v4` and `fetch-depth: 0`, Python 3.12 setup, the focused security regression tests, and `python scripts/scan_public_history.py .` as blocking steps.
+- [ ] Add a separate `public-history-security` job with `actions/checkout@v4` and `fetch-depth: 0`, Python 3.12 setup, the focused security regression tests, and `python scripts/scan_public_history.py --repo .` as blocking steps.
 - [ ] Keep the existing five job names stable (`frontend`, `python-sidecar`, `tauri-rust`, `macos-arm64-build`, `windows-x64-build`) and add only `public-history-security`, producing an exact six-job matrix.
 - [ ] Make the workflow regression test assert the six exact job IDs/names, full-history checkout, scanner command, compile gate, format gate, toolchain pin, `--locked`, and lockfile-diff checks.
 - [ ] Update the README prerequisites and verification commands to state that Rust 1.98.0 is pinned, Cargo.lock is committed, all Cargo verification is locked, compileall and rustfmt are gates, and the public-history scanner requires a complete fetched history.
@@ -127,7 +127,7 @@ Run: `python/.venv/bin/python -m pytest -q python/tests/regression/test_reproduc
 
 Run: `python/.venv/bin/python scripts/scan_sensitive.py .`
 
-Run: `python/.venv/bin/python scripts/scan_public_history.py .`
+Run: `python/.venv/bin/python scripts/scan_public_history.py --repo .`
 
 Expected: all tests and scanners PASS.
 
@@ -169,7 +169,7 @@ Run: `git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock`
 
 Run: `python/.venv/bin/python scripts/scan_sensitive.py .`
 
-Run: `python/.venv/bin/python scripts/scan_public_history.py .`
+Run: `python/.venv/bin/python scripts/scan_public_history.py --repo .`
 
 Run: `git diff --check origin/chore/complete-public-migration...HEAD`
 
