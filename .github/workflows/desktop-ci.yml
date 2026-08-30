@@ -1,0 +1,161 @@
+name: desktop-ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --dir apps/desktop test -- --run
+      - run: pnpm --dir apps/desktop lint
+      - run: pnpm --dir apps/desktop typecheck
+      - run: pnpm --dir apps/desktop build
+
+  python-sidecar:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e './python[test]'
+      - run: python -m compileall -q python/src python/tests scripts
+      - run: python scripts/scan_sensitive.py
+      - run: pytest python/tests -q
+      - run: python scripts/verify_desktop.py
+      - run: python scripts/real_provider_smoke.py
+        env:
+          AI_API_KEY: ""
+          ZAI_API_KEY: ""
+          ZHIPU_API_KEY: ""
+          BIGMODEL_API_KEY: ""
+          REAL_PROVIDER_SMOKE_API_KEY: ""
+          PII_HASH_PEPPER: ""
+          REAL_PROVIDER_SMOKE_PII_HASH_PEPPER: ""
+
+  tauri-rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt
+      - run: python -m pip install -e './python[build]'
+      - run: python scripts/build_sidecar.py
+      - run: cd apps/desktop/src-tauri && cargo test --locked
+      - run: cd apps/desktop/src-tauri && cargo check --locked
+      - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all --check
+
+  macos-arm64-build:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      github.event.pull_request.draft == false
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt
+      - name: Verify Apple Silicon runner
+        run: >-
+          python -c "import subprocess; value=subprocess.check_output(['rustc','--print','host-tuple'], text=True).strip(); assert value == 'aarch64-apple-darwin', value; print('MACOS_ARM64_RUNNER=PASS')"
+      - run: python -m pip install -e './python[build]'
+      - run: python scripts/build_sidecar.py
+      - run: pnpm install --frozen-lockfile
+      - run: cd apps/desktop/src-tauri && cargo test --locked
+      - run: pnpm --dir apps/desktop tauri build --debug --no-bundle -- --locked
+      - run: git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock
+      - run: echo 'MACOS_ARM64_BUILD=PASS'
+
+  windows-x64-build:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      github.event.pull_request.draft == false
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt
+      - name: Verify Windows x64 runner
+        run: >-
+          python -c "import subprocess; value=subprocess.check_output(['rustc','--print','host-tuple'], text=True).strip(); assert value == 'x86_64-pc-windows-msvc', value; print('WINDOWS_X64_RUNNER=PASS')"
+      - run: python -m pip install -e './python[build]'
+      - run: python scripts/build_sidecar.py
+      - run: pnpm install --frozen-lockfile
+      - run: cd apps/desktop/src-tauri && cargo test --locked
+      - run: pnpm --dir apps/desktop tauri build --debug --no-bundle -- --locked
+      - run: git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock
+      - run: echo 'WINDOWS_X64_BUILD=PASS'
+
+  public-history-security:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e './python[test]'
+      - run: python -m pytest -q python/tests/regression/test_public_history_scan.py
+      - run: python scripts/scan_public_history.py --repo .

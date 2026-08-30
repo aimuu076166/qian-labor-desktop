@@ -113,9 +113,7 @@ pub async fn start_backend(app: AppHandle) -> Result<BackendProcess> {
         .env("QIAN_DESKTOP_TOKEN", &token)
         .env("QIAN_DESKTOP_PORT", "0");
 
-    let (mut receiver, child) = command
-        .spawn()
-        .context("DESKTOP_SIDECAR_SPAWN_FAILED")?;
+    let (mut receiver, child) = command.spawn().context("DESKTOP_SIDECAR_SPAWN_FAILED")?;
     let expected_pid = child.pid();
     let mut child = Some(child);
 
@@ -183,9 +181,7 @@ pub async fn start_backend(app: AppHandle) -> Result<BackendProcess> {
 }
 
 #[tauri::command]
-pub fn desktop_backend_info(
-    state: State<'_, BackendState>,
-) -> Result<DesktopBackendInfo, String> {
+pub fn desktop_backend_info(state: State<'_, BackendState>) -> Result<DesktopBackendInfo, String> {
     state.info()
 }
 
@@ -195,10 +191,9 @@ mod tests {
 
     #[test]
     fn parses_only_loopback_ready_lines() {
-        let ready = parse_ready_line(
-            r#"QIAN_DESKTOP_READY={"host":"127.0.0.1","port":43123,"pid":77}"#,
-        )
-        .expect("valid loopback READY line");
+        let ready =
+            parse_ready_line(r#"QIAN_DESKTOP_READY={"host":"127.0.0.1","port":43123,"pid":77}"#)
+                .expect("valid loopback READY line");
         assert_eq!(
             ready,
             SidecarReady {
@@ -208,14 +203,14 @@ mod tests {
             }
         );
 
-        assert!(parse_ready_line(
-            r#"QIAN_DESKTOP_READY={"host":"0.0.0.0","port":43123,"pid":77}"#
-        )
-        .is_err());
-        assert!(parse_ready_line(
-            r#"QIAN_DESKTOP_READY={"host":"127.0.0.1","port":0,"pid":77}"#
-        )
-        .is_err());
+        assert!(
+            parse_ready_line(r#"QIAN_DESKTOP_READY={"host":"0.0.0.0","port":43123,"pid":77}"#)
+                .is_err()
+        );
+        assert!(
+            parse_ready_line(r#"QIAN_DESKTOP_READY={"host":"127.0.0.1","port":0,"pid":77}"#)
+                .is_err()
+        );
     }
 
     #[test]
