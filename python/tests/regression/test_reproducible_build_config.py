@@ -22,6 +22,7 @@ class WorkflowStep:
     name: str | None = None
     run: str | None = None
     uses: str | None = None
+    if_condition: str | None = None
     with_values: dict[str, str | None] = field(default_factory=dict)
     env: dict[str, str | None] = field(default_factory=dict)
 
@@ -29,6 +30,7 @@ class WorkflowStep:
 @dataclass
 class WorkflowJob:
     runs_on: str | None = None
+    if_condition: str | None = None
     env: dict[str, str | None] = field(default_factory=dict)
     steps: list[WorkflowStep] = field(default_factory=list)
 
@@ -64,10 +66,41 @@ def _workflow_jobs(workflow: str | None = None) -> dict[str, WorkflowJob]:
     section: str | None = None
     nested: str | None = None
     step: WorkflowStep | None = None
-    for line in lines[jobs_start + 1 :]:
+    block_target: tuple[WorkflowJob | WorkflowStep, str, int] | None = None
+    block_lines: list[str] = []
+
+    def assign_value(target: WorkflowJob | WorkflowStep, key: str, value: str | None) -> None:
+        attribute = {"if": "if_condition", "runs-on": "runs_on", "with": "with_values"}.get(
+            key, key
+        )
+        assert hasattr(target, attribute), f"unsupported workflow field: {key!r}"
+        setattr(target, attribute, value)
+
+    def finish_block() -> None:
+        nonlocal block_target, block_lines
+        assert block_target is not None
+        target, attribute, _ = block_target
+        nonblank = [line for line in block_lines if line.strip()]
+        if nonblank:
+            baseline = min(len(line) - len(line.lstrip(" ")) for line in nonblank)
+            value = "\n".join(line[baseline:] for line in block_lines).rstrip()
+        else:
+            value = ""
+        setattr(target, attribute, value)
+        block_target = None
+        block_lines = []
+
+    for line in [*lines[jobs_start + 1 :], ""]:
+        indentation = len(line) - len(line.lstrip(" "))
+        if block_target is not None:
+            _, _, block_indentation = block_target
+            if line.strip() and indentation > block_indentation:
+                block_lines.append(line)
+                continue
+            finish_block()
         if not line.strip():
             continue
-        match = re.fullmatch(r"  ([a-z0-9-]+):", line)
+        match = re.fullmatch(r"  ([A-Za-z_][A-Za-z0-9_-]*):", line)
         if match:
             current = WorkflowJob()
             jobs[match.group(1)] = current
@@ -76,34 +109,45 @@ def _workflow_jobs(workflow: str | None = None) -> dict[str, WorkflowJob]:
             continue
         if current is None:
             continue
-        indentation = len(line) - len(line.lstrip(" "))
         content = line.strip()
         if indentation == 4:
             key, value = _key_value(content)
             section = key
             nested = None
             step = None
-            if key == "runs-on":
-                current.runs_on = value
+            if key in {"runs-on", "if"}:
+                attribute = "if_condition" if key == "if" else key
+                if value in {"|", ">", "|-", ">-"}:
+                    block_target = (current, attribute, indentation)
+                else:
+                    assign_value(current, key, value)
+            continue
+        if indentation == 6 and section == "env" and step is None:
+            key, value = _key_value(content)
+            current.env[key] = value
             continue
         if indentation == 6 and section == "steps" and content.startswith("- "):
             step = WorkflowStep()
             current.steps.append(step)
             nested = None
             key, value = _key_value(content[2:])
-            setattr(step, key if key != "with" else "with_values", value)
+            attribute = "if_condition" if key == "if" else key
+            if value in {"|", ">", "|-", ">-"}:
+                block_target = (step, attribute, indentation)
+            else:
+                assign_value(step, key, value)
             continue
         if indentation == 8 and step is not None:
             key, value = _key_value(content)
             if key in {"with", "env"}:
                 nested = key
             else:
-                setattr(step, key if key != "with" else "with_values", value)
+                attribute = "if_condition" if key == "if" else key
+                if value in {"|", ">", "|-", ">-"}:
+                    block_target = (step, attribute, indentation)
+                else:
+                    assign_value(step, key, value)
                 nested = None
-            continue
-        if indentation == 8 and section == "env":
-            key, value = _key_value(content)
-            current.env[key] = value
             continue
         if indentation == 10 and step is not None and nested is not None:
             key, value = _key_value(content)
@@ -137,15 +181,16 @@ def _direct_cargo_invocations(command: str | None) -> list[tuple[str, list[str]]
 
 
 def _has_no_env_or_secret_context(job: WorkflowJob) -> bool:
-    values: list[str | None] = [*job.env.values()]
+    values: list[str | None] = [job.if_condition, *job.env.values()]
     if job.env:
         return False
     for step in job.steps:
         if step.env:
             return False
-        values.extend([step.run, step.uses, *step.with_values.values()])
+        values.extend([step.if_condition, step.run, step.uses, *step.with_values.values()])
     return not any(
-        value is not None and re.search(r"\$\{\{\s*secrets\.", value, flags=re.IGNORECASE)
+        value is not None
+        and re.search(r"\$\{\{\s*secrets(?:\.|\s*\[\s*['\"])", value, flags=re.IGNORECASE)
         for value in values
     )
 
@@ -346,12 +391,86 @@ def test_workflow_parser_rejects_nonempty_and_comment_only_history_env() -> None
         assert not _has_no_env_or_secret_context(jobs["public-history-security"])
 
 
+def test_workflow_parser_rejects_job_level_history_env() -> None:
+    jobs = _workflow_jobs(
+        """jobs:
+  public-history-security:
+    env:
+      AI_API_KEY: nonempty
+    steps:
+      - run: python scripts/scan_public_history.py --repo .
+"""
+    )
+
+    assert not _has_no_env_or_secret_context(jobs["public-history-security"])
+
+
 def test_workflow_parser_rejects_bracket_style_github_secret_context() -> None:
     jobs = _workflow_jobs(
         """jobs:
   public-history-security:
     steps:
-      - uses: ${{ secrets.PUBLIC_HISTORY_ACTION }}
+      - uses: ${{ secrets['PUBLIC_HISTORY_ACTION'] }}
+"""
+    )
+
+    assert not _has_no_env_or_secret_context(jobs["public-history-security"])
+
+
+def test_workflow_parser_includes_underscore_job_identifiers() -> None:
+    jobs = _workflow_jobs(
+        """jobs:
+  frontend:
+    steps:
+      - run: true
+  leak_secrets:
+    steps:
+      - run: true
+"""
+    )
+
+    assert set(jobs) == {"frontend", "leak_secrets"}
+
+
+def test_workflow_parser_captures_block_run_for_secret_detection() -> None:
+    jobs = _workflow_jobs(
+        """jobs:
+  public-history-security:
+    steps:
+      - run: |
+          echo ${{ secrets["PUBLIC_HISTORY_KEY"] }}
+"""
+    )
+
+    job = jobs["public-history-security"]
+    assert job.steps[0].run == 'echo ${{ secrets["PUBLIC_HISTORY_KEY"] }}'
+    assert not _has_no_env_or_secret_context(job)
+
+
+def test_workflow_parser_captures_block_job_condition() -> None:
+    jobs = _workflow_jobs(
+        """jobs:
+  public-history-security:
+    if: >-
+      github.event_name == 'push'
+    steps:
+      - run: true
+"""
+    )
+
+    assert getattr(jobs["public-history-security"], "if_condition", None) == (
+        "github.event_name == 'push'"
+    )
+
+
+def test_workflow_parser_rejects_secret_hidden_in_block_job_condition() -> None:
+    jobs = _workflow_jobs(
+        """jobs:
+  public-history-security:
+    if: >-
+      ${{ secrets["PUBLIC_HISTORY_CONDITION"] }}
+    steps:
+      - run: true
 """
     )
 
