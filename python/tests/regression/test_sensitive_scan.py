@@ -17,7 +17,7 @@ def _load_scan_module():
 
 def test_zhipu_style_key_assignments_are_detected_for_supported_env_names() -> None:
     scan = _load_scan_module()
-    synthetic_key = b"1234567890abcdef.abcdefghijklmnopqrstuvwxyz012345"
+    synthetic_key = b"1234567890abcdef." + (b"abcdefghijklmnopqrstuvwxyz" * 2)
     pattern = scan.PATTERNS["ZHIPU_KEY_ASSIGNMENT"]
 
     for name in (b"AI_API_KEY", b"ZAI_API_KEY", b"ZHIPU_API_KEY", b"BIGMODEL_API_KEY"):
@@ -47,6 +47,6 @@ def test_lowercase_python_setting_with_real_key_shape_is_detected() -> None:
     scan = _load_scan_module()
     pattern = scan.PATTERNS["ZHIPU_KEY_ASSIGNMENT"]
 
-    source = b'    ai_api_key="1234567890abcdef.abcdefghijklmnopqrstuvwxyz012345",'
+    source = b'    ai_api_key="' + b"1234567890abcdef." + (b"abcdefghijklmnopqrstuvwxyz" * 2) + b'",'
 
     assert pattern.search(source) is not None
