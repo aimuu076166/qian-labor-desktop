@@ -12,6 +12,7 @@ MANIFEST = ROOT / "apps" / "desktop" / "src-tauri" / "Cargo.toml"
 LOCKFILE = MANIFEST.with_name("Cargo.lock")
 TOOLCHAIN = ROOT / "rust-toolchain.toml"
 WORKFLOW = ROOT / ".github" / "workflows" / "desktop-ci.yml"
+README = ROOT / "README.md"
 
 
 def _workflow_job_blocks() -> dict[str, str]:
@@ -197,3 +198,23 @@ def test_desktop_ci_enforces_locked_builds_and_complete_history_security() -> No
         assert steps[package_index + 1] == (
             "      - run: git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock"
         )
+
+
+def test_readme_documents_scoped_locked_dependency_verification() -> None:
+    readme = README.read_text(encoding="utf-8")
+
+    assert "Rust 1.98.0 是当前已验证的候选固定工具链，仍待新的三平台 CI 结果确认。" in readme
+    assert "`Cargo.lock` 已提交；所有 Cargo 验证中的依赖解析均使用 `--locked`，以固定 Cargo 的依赖解析。" in readme
+    assert "不表示完整构建或安装包达到逐位可复现，也不表示已经完成签名生产发布。" in readme
+    assert "完整抓取的本地 Git 历史" in readme
+    assert "当前所有本地 ref 可达的提交消息、文件对象，以及从这些 ref 可达的附注标签消息" in readme
+    assert "未抓取到本地的远端历史不在扫描范围内" in readme
+
+    for command in (
+        "python -m compileall -q python/src python/tests scripts",
+        "python scripts/scan_public_history.py --repo .",
+        "cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all --check",
+        "cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked",
+        "cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked",
+    ):
+        assert command in readme

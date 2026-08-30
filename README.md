@@ -92,7 +92,7 @@ API Key 不得：
 - Node.js 22；
 - pnpm 9.15.0；
 - Python 3.12；
-- Rust stable；
+- Rust 1.98.0 是当前已验证的候选固定工具链，仍待新的三平台 CI 结果确认；
 - 对应平台的 Tauri 构建依赖。
 
 ## 安装和验证
@@ -106,18 +106,25 @@ pnpm --dir apps/desktop typecheck
 pnpm --dir apps/desktop build
 
 python -m pip install -e './python[test,build]'
+python -m compileall -q python/src python/tests scripts
 pytest python/tests -q
 
 python scripts/scan_sensitive.py
+python scripts/scan_public_history.py --repo .
 python scripts/verify_desktop.py
 python scripts/real_provider_smoke.py
 python scripts/build_sidecar.py
 
-cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
-cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
+cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all --check
+cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
+cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
 ```
 
 上述 `python` 表示 Python 3.12 解释器；不同平台上命令名可能是 `python`、`python3.12` 或 `py -3.12`，Windows 虚拟环境也应使用等价的 `python\.venv\Scripts\python.exe`。
+
+`Cargo.lock` 已提交；所有 Cargo 验证中的依赖解析均使用 `--locked`，以固定 Cargo 的依赖解析。Rust 1.98.0 是当前已验证的候选固定工具链，仍待新的三平台 CI 结果确认。这里的固定范围不表示完整构建或安装包达到逐位可复现，也不表示已经完成签名生产发布。
+
+`python -m compileall`、`cargo fmt --check` 和上述锁定的 Cargo 验证均为 CI 阻断门禁。公共历史扫描要求在非浅克隆且已完整抓取的本地 Git 历史上执行：它检查当前所有本地 ref 可达的提交消息、文件对象，以及从这些 ref 可达的附注标签消息；未抓取到本地的远端历史不在扫描范围内。CI 的 `public-history-security` job 使用完整历史检出后运行该扫描。
 
 `scripts/verify_desktop.py` 启动真实 sidecar 子进程，通过本机 HTTP 调用验证 synthetic Fake Provider 全链、来源追溯与重启后的持久化删除，并检查规则目录仍为 R01—R20 共 20 项。它不应输出 IPC token、材料正文、个人标识或模型密钥。
 
