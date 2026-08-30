@@ -45,6 +45,12 @@ jobs:
         with:
           toolchain: 1.98.0
           components: rustfmt
+      - name: Remap macOS release build paths
+        run: >-
+          echo "RUSTFLAGS=--remap-path-prefix=$HOME=BUILD_HOME
+          --remap-path-prefix=$GITHUB_WORKSPACE=BUILD_WORKSPACE
+          -C link-arg=-Wl,-S
+          -C link-arg=-Wl,-x" >> "$GITHUB_ENV"
       - name: Verify Apple Silicon runner
         run: >-
           python -c "import subprocess; value=subprocess.check_output(['rustc','--print','host-tuple'], text=True).strip(); assert value == 'aarch64-apple-darwin', value; print('MACOS_ARM64_RUNNER=PASS')"
@@ -154,6 +160,13 @@ jobs:
         with:
           toolchain: 1.98.0
           components: rustfmt
+      - name: Remap Windows release build paths
+        shell: pwsh
+        run: >-
+          "RUSTFLAGS=--remap-path-prefix=$env:USERPROFILE=BUILD_HOME
+          --remap-path-prefix=$env:GITHUB_WORKSPACE=BUILD_WORKSPACE
+          -C strip=symbols" |
+          Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Verify Windows x64 runner
         run: >-
           python -c "import subprocess; value=subprocess.check_output(['rustc','--print','host-tuple'], text=True).strip(); assert value == 'x86_64-pc-windows-msvc', value; print('WINDOWS_X64_RUNNER=PASS')"

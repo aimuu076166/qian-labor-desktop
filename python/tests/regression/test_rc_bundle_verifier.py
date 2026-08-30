@@ -151,8 +151,8 @@ def test_bundle_verifier_rejects_prohibited_payload_files(
     "leaked_text",
     [
         "sk-" + "testabcdefghijklmnopqrstuvwx",
-        "/Users/runner/work/qian-labor-desktop/private-build",
-        "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\private-build",
+        "/Users/local-builder/work/qian-labor-desktop/private-build",
+        "C:\\Users\\local-builder\\AppData\\Local\\Temp\\private-build",
     ],
 )
 def test_bundle_verifier_redacts_sensitive_or_build_path_matches(

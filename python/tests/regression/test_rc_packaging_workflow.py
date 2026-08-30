@@ -48,6 +48,7 @@ def test_rc_platform_jobs_pin_tools_and_execute_real_acceptance() -> None:
     for name in ("macos-arm64-rc", "windows-x64-rc"):
         block = _job_block(workflow, name)
         assert 'CI: "true"' in block
+        assert "--remap-path-prefix=" in block
         for required in (
             "actions/checkout@v4",
             "pnpm/action-setup@v4",
@@ -72,8 +73,12 @@ def test_rc_platform_jobs_pin_tools_and_execute_real_acceptance() -> None:
         ):
             assert required in block, f"{name} missing {required}"
 
-    assert "--bundles app,dmg --no-sign --ci -- --locked" in _job_block(workflow, "macos-arm64-rc")
+    macos = _job_block(workflow, "macos-arm64-rc")
+    assert "-C link-arg=-Wl,-S" in macos
+    assert "-C link-arg=-Wl,-x" in macos
+    assert "--bundles app,dmg --no-sign --ci -- --locked" in macos
     windows = _job_block(workflow, "windows-x64-rc")
+    assert "-C strip=symbols" in windows
     assert "--bundles nsis --no-sign --ci -- --locked" in windows
     assert '"/S"' in windows and '"/D=' in windows
 

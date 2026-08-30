@@ -146,6 +146,7 @@ cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
 macOS ARM64 本地候选构建示例：
 
 ```bash
+export RUSTFLAGS="--remap-path-prefix=$HOME=BUILD_HOME -C link-arg=-Wl,-S -C link-arg=-Wl,-x"
 python scripts/build_sidecar.py
 python scripts/verify_built_sidecar.py \
   --binary apps/desktop/src-tauri/binaries/qian-sidecar-aarch64-apple-darwin

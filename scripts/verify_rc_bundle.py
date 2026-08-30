@@ -23,10 +23,13 @@ SENSITIVE_PATTERNS = (
     re.compile(rb"(?:api[_-]?key|access[_-]?token|client[_-]?secret)\s*[:=]\s*['\"]?[A-Za-z0-9_./+-]{16,}", re.I),
 )
 BUILD_PATH_PATTERNS = (
+    b"/Users/",
+    b"/home/",
     b"/Users/runner/",
     b"/home/runner/work/",
     b"/private/var/folders/",
     b"C:\\Users\\runneradmin\\",
+    b":\\Users\\",
     b"D:\\a\\",
     b"\\AppData\\Local\\Temp\\",
 )
