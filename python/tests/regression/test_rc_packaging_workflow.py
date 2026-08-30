@@ -81,6 +81,12 @@ def test_rc_platform_jobs_pin_tools_and_execute_real_acceptance() -> None:
     assert "-C strip=symbols" in windows
     assert "--bundles nsis --no-sign --ci -- --locked" in windows
     assert '"/S"' in windows and '"/D=' in windows
+    assert "QIAN_INSTALLED_SIDECAR" in windows
+    assert "Get-FileHash" in windows
+    assert "INSTALLED_SIDECAR_HASH_MISMATCH" in windows
+    assert (
+        'verify_built_sidecar.py --binary "$env:QIAN_INSTALLED_SIDECAR"' in windows
+    )
 
 
 def test_rc_manifest_job_downloads_and_reverifies_platform_artifacts() -> None:

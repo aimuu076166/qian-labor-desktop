@@ -210,12 +210,19 @@ jobs:
           if ($process.ExitCode -ne 0) { throw "NSIS_INSTALL_FAILED" }
           if (-not (Test-Path -LiteralPath $installRoot -PathType Container)) { throw "NSIS_INSTALL_ROOT_MISSING" }
           "QIAN_INSTALL_ROOT=$installRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Locate installed application executable
+      - name: Locate installed application and sidecar executables
         shell: pwsh
         run: |
           $candidates = @(Get-ChildItem -LiteralPath $env:QIAN_INSTALL_ROOT -Recurse -File | Where-Object { $_.Name -in @("qian-labor-desktop.exe", "企安用工.exe") })
           if ($candidates.Count -ne 1) { throw "INSTALLED_APP_COUNT_INVALID" }
+          $sidecars = @(Get-ChildItem -LiteralPath $env:QIAN_INSTALL_ROOT -Recurse -File | Where-Object { $_.Name -like "qian-sidecar*.exe" })
+          if ($sidecars.Count -ne 1) { throw "INSTALLED_SIDECAR_COUNT_INVALID" }
+          $sourceSidecar = Resolve-Path -LiteralPath "apps/desktop/src-tauri/binaries/qian-sidecar-x86_64-pc-windows-msvc.exe"
+          $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceSidecar).Hash
+          $installedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sidecars[0].FullName).Hash
+          if ($sourceHash -ne $installedHash) { throw "INSTALLED_SIDECAR_HASH_MISMATCH" }
           "QIAN_INSTALLED_APP=$($candidates[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "QIAN_INSTALLED_SIDECAR=$($sidecars[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Verify installed Windows payload
         run: >-
           python scripts/verify_rc_bundle.py
@@ -223,6 +230,8 @@ jobs:
           --payload "$env:QIAN_INSTALL_ROOT"
           --source-config apps/desktop/src-tauri/tauri.conf.json
           --expected-commit "$env:RC_COMMIT"
+      - name: Smoke-test the installed Windows sidecar directly
+        run: python scripts/verify_built_sidecar.py --binary "$env:QIAN_INSTALLED_SIDECAR"
       - name: Smoke-test the installed Windows application
         run: python scripts/smoke_packaged_app.py --app-binary "$env:QIAN_INSTALLED_APP"
       - name: Uninstall the temporary Windows candidate
