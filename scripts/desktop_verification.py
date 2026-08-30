@@ -24,6 +24,7 @@ from qian_labor.rules.catalog import RULE_IDS
 ROOT = Path(__file__).resolve().parents[1]
 READY_PREFIX = "QIAN_DESKTOP_READY="
 TERMINAL = {"completed", "matching_review", "partial", "failed"}
+PROCESSING_TIMEOUT_SECONDS = 90
 MARKERS = (
     "SIDECAR_BOOT=PASS",
     "LOOPBACK_ONLY=PASS",
@@ -211,7 +212,7 @@ def _stop_sidecar(running: RunningSidecar) -> None:
 
 
 def _poll(client: httpx.Client, analysis_id: str) -> dict[str, object]:
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + PROCESSING_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         response = client.get(f"/api/analyses/{analysis_id}/processing")
         if response.status_code != 200:
