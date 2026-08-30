@@ -2442,6 +2442,7 @@ name = "qian-labor-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "rand",
  "serde",
  "serde_json",
@@ -2450,6 +2451,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

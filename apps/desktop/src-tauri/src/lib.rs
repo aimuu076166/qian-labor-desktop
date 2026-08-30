@@ -2,7 +2,7 @@ mod sidecar;
 
 use std::io;
 
-use sidecar::{desktop_backend_info, start_backend, BackendState};
+use sidecar::{desktop_backend_info, run_packaged_smoke, start_backend, BackendState};
 use tauri::{Manager, RunEvent};
 
 fn startup_error(code: &'static str) -> Box<dyn std::error::Error> {
@@ -19,10 +19,13 @@ pub fn run() {
         .setup(|app| {
             let backend = tauri::async_runtime::block_on(start_backend(app.handle().clone()))
                 .map_err(|_| startup_error("DESKTOP_BACKEND_START_FAILED"))?;
+            let smoke_context = backend.packaged_smoke_context();
             app.state::<BackendState>()
                 .install(backend)
                 .map_err(|_| startup_error("DESKTOP_BACKEND_STATE_FAILED"))?;
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(context) = smoke_context {
+                tauri::async_runtime::spawn(run_packaged_smoke(app.handle().clone(), context));
+            } else if let Some(window) = app.get_webview_window("main") {
                 window.show()?;
             }
             Ok(())

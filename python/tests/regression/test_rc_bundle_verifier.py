@@ -6,6 +6,7 @@ import plistlib
 import stat
 import struct
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -220,3 +221,72 @@ def test_manifest_validation_rejects_invalid_evidence(tmp_path: Path, mutation: 
 
     with pytest.raises(manifest.ManifestError):
         manifest.combine_manifests([path], tmp_path, tmp_path / "out")
+
+
+def test_packaged_smoke_result_requires_database_and_non_sensitive_pid() -> None:
+    smoke = _load("smoke_packaged_app")
+    with tempfile.TemporaryDirectory(prefix="qian-rc-smoke-test-") as temporary:
+        root = Path(temporary)
+        data_dir = root / "app-data"
+        data_dir.mkdir()
+        (data_dir / "qian-labor.db").write_bytes(b"sqlite")
+
+        pid = smoke.validate_smoke_result(
+            root,
+            {"database_created": True, "sidecar_pid": 999_999_999},
+        )
+
+        assert pid == 999_999_999
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"database_created": False, "sidecar_pid": 4},
+        {"database_created": True, "sidecar_pid": "4"},
+        {"database_created": True, "sidecar_pid": 4, "token": "must-not-exist"},
+    ],
+)
+def test_packaged_smoke_result_rejects_unverifiable_evidence(
+    tmp_path: Path, payload: dict[str, object]
+) -> None:
+    smoke = _load("smoke_packaged_app")
+
+    with pytest.raises(smoke.PackagedSmokeError):
+        smoke.validate_smoke_result(tmp_path, payload)
+
+
+def test_staging_uses_exact_ascii_rc_artifact_names(tmp_path: Path) -> None:
+    staging = _load("stage_rc_artifacts")
+    app = _mac_app(tmp_path)
+    dmg = tmp_path / "企安用工_0.1.0_aarch64.dmg"
+    dmg.write_bytes(b"disk image")
+    mac_output = tmp_path / "mac-output"
+    mac_paths = staging.stage_macos(app, dmg, mac_output)
+
+    installer = tmp_path / "企安用工_0.1.0_x64-setup.exe"
+    installer.write_bytes(b"installer")
+    windows_paths = staging.stage_windows(installer, tmp_path / "windows-output")
+
+    names = [path.name for path in [*mac_paths, *windows_paths]]
+    assert names == [
+        "qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.app.tar.gz",
+        "qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.dmg",
+        "qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe",
+    ]
+    assert all(name.isascii() for name in names)
+
+
+def test_staging_refuses_a_nonempty_output_directory(tmp_path: Path) -> None:
+    staging = _load("stage_rc_artifacts")
+    installer = tmp_path / "setup.exe"
+    installer.write_bytes(b"installer")
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "unrelated.txt").write_text("preserve", encoding="utf-8")
+
+    with pytest.raises(staging.StagingError) as captured:
+        staging.stage_windows(installer, output)
+
+    assert captured.value.code == "STAGING_OUTPUT_NOT_EMPTY"
