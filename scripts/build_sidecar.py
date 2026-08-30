@@ -51,6 +51,8 @@ def build() -> Path:
             "--noconfirm",
             "--clean",
             "--onefile",
+            "--collect-data",
+            "qian_labor",
             "--name",
             "qian-sidecar",
             "--paths",

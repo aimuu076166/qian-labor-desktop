@@ -65,3 +65,8 @@ def test_built_sidecar_cli_redacts_a_missing_binary_path(tmp_path: Path) -> None
     assert result.stderr.strip() == "BUILT_SIDECAR_VERIFY=FAIL:BINARY_MISSING"
     assert str(missing) not in result.stderr
 
+
+def test_sidecar_build_collects_the_packaged_rule_catalog() -> None:
+    build_script = (SCRIPTS / "build_sidecar.py").read_text(encoding="utf-8")
+
+    assert '"--collect-data",\n            "qian_labor",' in build_script
