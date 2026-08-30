@@ -1,0 +1,222 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import plistlib
+import stat
+import struct
+import sys
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[3]
+SCRIPTS = ROOT / "scripts"
+CONFIG = ROOT / "apps" / "desktop" / "src-tauri" / "tauri.conf.json"
+COMMIT = "a" * 40
+
+
+def _load(name: str):
+    path = SCRIPTS / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _write_macho(path: Path, cpu_type: int = 0x0100000C) -> None:
+    path.write_bytes(struct.pack("<IiiIIIII", 0xFEEDFACF, cpu_type, 0, 2, 0, 0, 0, 0))
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+
+
+def _write_pe(path: Path, machine: int = 0x8664) -> None:
+    payload = bytearray(256)
+    payload[:2] = b"MZ"
+    struct.pack_into("<I", payload, 0x3C, 0x80)
+    payload[0x80:0x84] = b"PE\0\0"
+    struct.pack_into("<H", payload, 0x84, machine)
+    path.write_bytes(payload)
+
+
+def _mac_app(root: Path) -> Path:
+    app = root / "Qian.app"
+    macos = app / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    with (app / "Contents" / "Info.plist").open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleIdentifier": "cn.qianlabor.desktop",
+                "CFBundleShortVersionString": "0.1.0",
+                "CFBundleExecutable": "qian-labor-desktop",
+            },
+            handle,
+        )
+    _write_macho(macos / "qian-labor-desktop")
+    _write_macho(macos / "qian-sidecar")
+    return app
+
+
+def _windows_payload(root: Path) -> Path:
+    payload = root / "installed"
+    payload.mkdir()
+    _write_pe(payload / "企安用工.exe")
+    _write_pe(payload / "qian-sidecar.exe")
+    return payload
+
+
+def test_bundle_verifier_accepts_expected_macos_and_windows_architectures(tmp_path: Path) -> None:
+    verifier = _load("verify_rc_bundle")
+
+    assert verifier.detect_macho_arch(_mac_app(tmp_path) / "Contents/MacOS/qian-sidecar") == "arm64"
+    windows = _windows_payload(tmp_path)
+    assert verifier.detect_pe_arch(windows / "qian-sidecar.exe") == "x64"
+    verifier.verify_payload(_mac_app(tmp_path / "second"), "macos", CONFIG)
+    verifier.verify_payload(windows, "windows", CONFIG, verify_windows_version=False)
+
+
+@pytest.mark.parametrize(
+    ("platform", "machine", "expected_code"),
+    [("macos", 0x01000007, "ARCHITECTURE_INVALID"), ("windows", 0x014C, "ARCHITECTURE_INVALID")],
+)
+def test_bundle_verifier_rejects_wrong_architecture(
+    tmp_path: Path, platform: str, machine: int, expected_code: str
+) -> None:
+    verifier = _load("verify_rc_bundle")
+    payload = _mac_app(tmp_path) if platform == "macos" else _windows_payload(tmp_path)
+    sidecar = next(path for path in payload.rglob("qian-sidecar*") if path.is_file())
+    if platform == "macos":
+        _write_macho(sidecar, machine)
+    else:
+        _write_pe(sidecar, machine)
+
+    with pytest.raises(verifier.BundleVerificationError) as captured:
+        verifier.verify_payload(payload, platform, CONFIG, verify_windows_version=False)
+
+    assert captured.value.code == expected_code
+
+
+@pytest.mark.parametrize("filename", [".env", "private.sqlite", "run.log", "state.cache", "fixture.json"])
+def test_bundle_verifier_rejects_prohibited_payload_files(
+    tmp_path: Path, filename: str
+) -> None:
+    verifier = _load("verify_rc_bundle")
+    app = _mac_app(tmp_path)
+    (app / "Contents" / "Resources").mkdir()
+    (app / "Contents" / "Resources" / filename).write_text("synthetic", encoding="utf-8")
+
+    with pytest.raises(verifier.BundleVerificationError) as captured:
+        verifier.verify_payload(app, "macos", CONFIG)
+
+    assert captured.value.code == "PROHIBITED_PAYLOAD_FILE"
+
+
+@pytest.mark.parametrize(
+    "leaked_text",
+    [
+        "sk-" + "testabcdefghijklmnopqrstuvwx",
+        "/Users/runner/work/qian-labor-desktop/private-build",
+        "C:\\Users\\runneradmin\\AppData\\Local\\Temp\\private-build",
+    ],
+)
+def test_bundle_verifier_redacts_sensitive_or_build_path_matches(
+    tmp_path: Path, leaked_text: str
+) -> None:
+    verifier = _load("verify_rc_bundle")
+    app = _mac_app(tmp_path)
+    leaked = app / "Contents" / "Resources" / "metadata.txt"
+    leaked.parent.mkdir()
+    leaked.write_text(leaked_text, encoding="utf-8")
+
+    with pytest.raises(verifier.BundleVerificationError) as captured:
+        verifier.verify_payload(app, "macos", CONFIG)
+
+    assert captured.value.code in {"SENSITIVE_PAYLOAD", "BUILD_PATH_REFERENCE"}
+    assert leaked_text not in str(captured.value)
+
+
+def test_platform_manifests_combine_into_sorted_verified_evidence(tmp_path: Path) -> None:
+    manifest = _load("rc_manifest")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    mac_app = artifacts / "qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.app.tar.gz"
+    mac_dmg = artifacts / "qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.dmg"
+    windows = artifacts / "qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe"
+    mac_app.write_bytes(b"app archive")
+    mac_dmg.write_bytes(b"dmg image")
+    windows.write_bytes(b"nsis installer")
+    toolchain = {"node": "v22", "pnpm": "9.15.0", "python": "3.12", "rustc": "1.98.0"}
+    workflow = {"repository": "owner/repo", "run_id": "123", "run_attempt": "1"}
+    mac_manifest = tmp_path / "mac.json"
+    windows_manifest = tmp_path / "windows.json"
+    manifest.create_platform_manifest(
+        [mac_app, mac_dmg], mac_manifest, "macos", "arm64", COMMIT,
+        "PASS", "PASS", toolchain, workflow, "2026-08-31T00:00:00Z",
+    )
+    manifest.create_platform_manifest(
+        [windows], windows_manifest, "windows", "x64", COMMIT,
+        "PASS", "PASS", toolchain, workflow, "2026-08-31T00:00:00Z",
+    )
+
+    output = tmp_path / "combined"
+    combined = manifest.combine_manifests([mac_manifest, windows_manifest], artifacts, output)
+
+    assert combined["git_commit"] == COMMIT
+    assert combined["signed"] is False
+    assert combined["notarized"] is False
+    assert combined["real_provider_smoke"] == "NOT_RUN"
+    assert combined["image_input"] == "NOT_RUN"
+    names = [entry["artifact_name"] for entry in combined["artifacts"]]
+    assert names == sorted(names)
+    checksum_names = [line.split("  ", 1)[1] for line in (output / "SHA256SUMS.txt").read_text().splitlines()]
+    assert checksum_names == sorted(names)
+    manifest.verify_combined_manifest(output / "BUILD-MANIFEST.json", artifacts)
+
+
+def test_manifest_verification_rejects_checksum_mismatch_without_leaking_content(
+    tmp_path: Path,
+) -> None:
+    manifest = _load("rc_manifest")
+    artifact = tmp_path / "qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe"
+    artifact.write_bytes(b"first")
+    platform_manifest = tmp_path / "windows.json"
+    manifest.create_platform_manifest(
+        [artifact], platform_manifest, "windows", "x64", COMMIT, "PASS", "PASS",
+        {"node": "v22", "pnpm": "9.15.0", "python": "3.12", "rustc": "1.98.0"},
+        {"repository": "owner/repo", "run_id": "123", "run_attempt": "1"},
+        "2026-08-31T00:00:00Z",
+    )
+    artifact.write_bytes(b"private changed content")
+
+    with pytest.raises(manifest.ManifestError) as captured:
+        manifest.combine_manifests([platform_manifest], tmp_path, tmp_path / "out")
+
+    assert captured.value.code == "ARTIFACT_CHECKSUM_MISMATCH"
+    assert "private changed content" not in str(captured.value)
+
+
+@pytest.mark.parametrize("mutation", ["missing_field", "missing_artifact", "duplicate_name"])
+def test_manifest_validation_rejects_invalid_evidence(tmp_path: Path, mutation: str) -> None:
+    manifest = _load("rc_manifest")
+    artifact = tmp_path / "qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe"
+    artifact.write_bytes(b"installer")
+    path = tmp_path / "platform.json"
+    manifest.create_platform_manifest(
+        [artifact], path, "windows", "x64", COMMIT, "PASS", "PASS",
+        {"node": "v22", "pnpm": "9.15.0", "python": "3.12", "rustc": "1.98.0"},
+        {"repository": "owner/repo", "run_id": "123", "run_attempt": "1"},
+        "2026-08-31T00:00:00Z",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if mutation == "missing_field":
+        del payload["artifacts"][0]["sha256"]
+    elif mutation == "missing_artifact":
+        payload["artifacts"][0]["artifact_name"] = "missing.exe"
+    else:
+        payload["artifacts"].append(dict(payload["artifacts"][0]))
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(manifest.ManifestError):
+        manifest.combine_manifests([path], tmp_path, tmp_path / "out")
