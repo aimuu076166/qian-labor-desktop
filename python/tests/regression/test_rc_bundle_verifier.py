@@ -333,6 +333,34 @@ def test_packaged_smoke_result_rejects_unverifiable_evidence(
         smoke.validate_smoke_result(tmp_path, payload)
 
 
+def test_packaged_smoke_nonzero_exit_reports_only_a_stable_failure_code(tmp_path: Path) -> None:
+    smoke = _load("smoke_packaged_app")
+    (tmp_path / "failure.json").write_text(
+        '{"code":"DESKTOP_SIDECAR_SPAWN_FAILED"}', encoding="utf-8"
+    )
+
+    assert smoke.diagnose_nonzero_exit(tmp_path) == (
+        "APP_EXIT_FAILED:DESKTOP_SIDECAR_SPAWN_FAILED"
+    )
+
+    (tmp_path / "failure.json").write_text(
+        '{"code":"private-path\\nTOKEN_VALUE"}', encoding="utf-8"
+    )
+    assert smoke.diagnose_nonzero_exit(tmp_path) == "APP_EXIT_FAILED:NO_STABLE_DIAGNOSTIC"
+
+
+def test_packaged_smoke_distinguishes_nonzero_exit_after_valid_result(tmp_path: Path) -> None:
+    smoke = _load("smoke_packaged_app")
+    data_dir = tmp_path / "app-data"
+    data_dir.mkdir()
+    (data_dir / "qian-labor.db").write_bytes(b"sqlite")
+    (tmp_path / "result.json").write_text(
+        '{"database_created":true,"sidecar_pid":999999999}', encoding="utf-8"
+    )
+
+    assert smoke.diagnose_nonzero_exit(tmp_path) == "APP_EXIT_FAILED:AFTER_VALID_RESULT"
+
+
 def test_staging_uses_exact_ascii_rc_artifact_names(tmp_path: Path) -> None:
     staging = _load("stage_rc_artifacts")
     app = _mac_app(tmp_path)

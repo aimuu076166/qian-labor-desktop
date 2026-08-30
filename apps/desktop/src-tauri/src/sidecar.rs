@@ -195,6 +195,33 @@ fn configured_smoke_root() -> Result<Option<PathBuf>, String> {
     validated_smoke_root(flag.as_deref(), std::env::var_os(SMOKE_ROOT).as_deref()).map(Some)
 }
 
+fn stable_failure_code(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    (3..=160).contains(&bytes.len())
+        && bytes[0].is_ascii_uppercase()
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+}
+
+pub fn record_packaged_smoke_failure(error: &anyhow::Error) {
+    let code = error.to_string();
+    if !stable_failure_code(&code) {
+        return;
+    }
+    let Ok(Some(root)) = configured_smoke_root() else {
+        return;
+    };
+    let Ok(payload) = serde_json::to_vec(&serde_json::json!({"code": code})) else {
+        return;
+    };
+    let temporary = root.join("failure.json.tmp");
+    let destination = root.join("failure.json");
+    if std::fs::write(&temporary, payload).is_ok() {
+        let _ = std::fs::rename(temporary, destination);
+    }
+}
+
 pub async fn start_backend(app: AppHandle) -> Result<BackendProcess> {
     let smoke_root = configured_smoke_root().map_err(anyhow::Error::msg)?;
     let data_dir = match &smoke_root {
@@ -352,6 +379,14 @@ mod tests {
         assert_eq!(second.len(), 64);
         assert!(first.chars().all(|value| value.is_ascii_hexdigit()));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn packaged_smoke_failure_codes_are_strictly_bounded() {
+        assert!(stable_failure_code("DESKTOP_SIDECAR_SPAWN_FAILED"));
+        assert!(!stable_failure_code("private path"));
+        assert!(!stable_failure_code("DESKTOP_FAILURE\nINJECTED"));
+        assert!(!stable_failure_code(&"A".repeat(161)));
     }
 
     #[test]

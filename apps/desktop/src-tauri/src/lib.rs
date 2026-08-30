@@ -2,7 +2,10 @@ mod sidecar;
 
 use std::io;
 
-use sidecar::{desktop_backend_info, run_packaged_smoke, start_backend, BackendState};
+use sidecar::{
+    desktop_backend_info, record_packaged_smoke_failure, run_packaged_smoke, start_backend,
+    BackendState,
+};
 use tauri::{Manager, RunEvent};
 
 fn startup_error(code: &'static str) -> Box<dyn std::error::Error> {
@@ -17,8 +20,14 @@ pub fn run() {
         .manage(BackendState::default())
         .invoke_handler(tauri::generate_handler![desktop_backend_info])
         .setup(|app| {
-            let backend = tauri::async_runtime::block_on(start_backend(app.handle().clone()))
-                .map_err(|_| startup_error("DESKTOP_BACKEND_START_FAILED"))?;
+            let backend = match tauri::async_runtime::block_on(start_backend(app.handle().clone()))
+            {
+                Ok(backend) => backend,
+                Err(error) => {
+                    record_packaged_smoke_failure(&error);
+                    return Err(startup_error("DESKTOP_BACKEND_START_FAILED"));
+                }
+            };
             let smoke_context = backend.packaged_smoke_context();
             app.state::<BackendState>()
                 .install(backend)

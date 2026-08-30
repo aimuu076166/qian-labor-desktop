@@ -5,6 +5,7 @@ import argparse
 import ctypes
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -17,6 +18,9 @@ class PackagedSmokeError(RuntimeError):
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)
+
+
+STABLE_FAILURE_CODE = re.compile(r"[A-Z][A-Z0-9_]{2,159}")
 
 
 def process_is_alive(pid: int) -> bool:
@@ -57,6 +61,33 @@ def validate_smoke_result(root: Path, payload: object) -> int:
     if not (root / "app-data" / "qian-labor.db").is_file():
         raise PackagedSmokeError("DATABASE_MISSING")
     return pid
+
+
+def diagnose_nonzero_exit(root: Path) -> str:
+    failure_path = root / "failure.json"
+    if failure_path.is_file():
+        try:
+            failure = json.loads(failure_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            failure = None
+        if (
+            isinstance(failure, dict)
+            and set(failure) == {"code"}
+            and isinstance(failure["code"], str)
+            and STABLE_FAILURE_CODE.fullmatch(failure["code"])
+        ):
+            return f"APP_EXIT_FAILED:{failure['code']}"
+
+    result_path = root / "result.json"
+    if result_path.is_file():
+        try:
+            payload = json.loads(result_path.read_text(encoding="utf-8"))
+            validate_smoke_result(root, payload)
+        except (json.JSONDecodeError, OSError, PackagedSmokeError):
+            pass
+        else:
+            return "APP_EXIT_FAILED:AFTER_VALID_RESULT"
+    return "APP_EXIT_FAILED:NO_STABLE_DIAGNOSTIC"
 
 
 def _popen_options() -> dict[str, object]:
@@ -131,7 +162,7 @@ def smoke_packaged_app(binary: Path) -> None:
             except subprocess.TimeoutExpired as error:
                 raise PackagedSmokeError("APP_EXIT_TIMEOUT") from error
             if return_code != 0:
-                raise PackagedSmokeError("APP_EXIT_FAILED")
+                raise PackagedSmokeError(diagnose_nonzero_exit(root))
             result_path = root / "result.json"
             if not result_path.is_file():
                 raise PackagedSmokeError("RESULT_MISSING")
