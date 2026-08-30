@@ -4,6 +4,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -39,12 +40,15 @@ def _commit(repo: Path, path: str, content: str, message: str = "commit") -> Non
     _git(repo, "commit", "-q", "-m", message)
 
 
-def _scan(repo: Path | str) -> subprocess.CompletedProcess[str]:
+def _scan(
+    repo: Path | str, *, environment: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT), "--repo", str(repo)],
         text=True,
         capture_output=True,
         check=False,
+        env=environment,
     )
 
 
@@ -61,6 +65,11 @@ def _assert_safe_output(result: subprocess.CompletedProcess[str], secret: str) -
     assert secret not in result.stderr
     assert "\x1b" not in result.stdout
     assert "\x1b" not in result.stderr
+
+
+def _assert_no_control_or_format_characters(value: str) -> None:
+    for line in value.splitlines():
+        assert not any(unicodedata.category(character) in {"Cc", "Cf"} for character in line)
 
 
 def test_clean_complete_history_passes(tmp_path: Path) -> None:
@@ -143,6 +152,40 @@ def test_credential_in_annotated_tag_message_is_reported_without_value(tmp_path:
     _assert_safe_output(result, secret)
 
 
+def test_credential_in_tag_reachable_only_through_another_tag_is_reported(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _commit(repo, "clean.txt", "clean")
+    secret = _credential()
+    _git(repo, "tag", "-a", "inner", "-m", "inner " + secret)
+    _git(repo, "tag", "-a", "outer", "inner", "-m", "outer")
+    inner_oid = _git(repo, "rev-parse", "inner^{tag}").stdout.decode().strip()[:12]
+    _git(repo, "update-ref", "-d", "refs/tags/inner")
+
+    result = _scan(repo)
+
+    assert result.returncode == 1
+    assert result.stderr == f"PUBLIC_HISTORY_SENSITIVE_SCAN_FAIL=OPENAI_STYLE_API_KEY:{inner_oid}:ANNOTATED_TAG_MESSAGE\n"
+    _assert_safe_output(result, secret)
+
+
+def test_credential_in_tag_under_non_tag_ref_namespace_is_reported(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _commit(repo, "clean.txt", "clean")
+    secret = _credential()
+    _git(repo, "tag", "-a", "hidden", "-m", "hidden " + secret)
+    tag_oid = _git(repo, "rev-parse", "hidden^{tag}").stdout.decode().strip()
+    _git(repo, "update-ref", "refs/remotes/origin/hidden-tag", tag_oid)
+    _git(repo, "update-ref", "-d", "refs/tags/hidden")
+
+    result = _scan(repo)
+
+    assert result.returncode == 1
+    assert result.stderr == (
+        f"PUBLIC_HISTORY_SENSITIVE_SCAN_FAIL=OPENAI_STYLE_API_KEY:{tag_oid[:12]}:ANNOTATED_TAG_MESSAGE\n"
+    )
+    _assert_safe_output(result, secret)
+
+
 def test_placeholder_and_synthetic_assignments_are_permitted(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     content = "\n".join(
@@ -210,6 +253,25 @@ def test_shallow_repository_fails_with_stable_reason(tmp_path: Path) -> None:
     assert result.stderr == ""
 
 
+def test_complete_bare_repository_passes(tmp_path: Path) -> None:
+    source_parent = tmp_path / "bare-source-parent"
+    source_parent.mkdir()
+    source = _repo(source_parent)
+    _commit(source, "clean.txt", "clean")
+    bare = tmp_path / "history.git"
+    subprocess.run(
+        ["git", "clone", "-q", "--bare", str(source), str(bare)],
+        check=True,
+        capture_output=True,
+    )
+
+    result = _scan(bare)
+
+    assert result.returncode == 0
+    assert result.stdout == "PUBLIC_HISTORY_SENSITIVE_SCAN=PASS\n"
+    assert result.stderr == ""
+
+
 @pytest.mark.parametrize("kind", ["not-a-repository", "missing"])
 def test_invalid_repository_input_fails_without_path_leaks(tmp_path: Path, kind: str) -> None:
     secret = _credential()
@@ -240,6 +302,53 @@ def test_unsafe_filename_never_leaks_secret_or_control_character(tmp_path: Path)
     assert result.returncode == 1
     assert "<unsafe-path>" in result.stderr
     _assert_safe_output(result, secret)
+
+
+@pytest.mark.parametrize("marker", ["\u0085", "\u202e", "\u2066"])
+def test_unicode_control_or_format_filename_is_redacted(tmp_path: Path, marker: str) -> None:
+    repo = _repo(tmp_path)
+    secret = _credential()
+    filename = "unicode-" + marker + ".txt"
+    _commit(repo, filename, secret)
+
+    result = _scan(repo)
+
+    assert result.returncode == 1
+    assert "<unsafe-path>" in result.stderr
+    _assert_safe_output(result, secret)
+    _assert_no_control_or_format_characters(result.stdout + result.stderr)
+
+
+def test_git_launch_failure_has_stable_safe_metadata(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _commit(repo, "clean.txt", "clean")
+    secret = _credential()
+    environment = {"PATH": "", "SCAN_TEST_MARKER": secret}
+
+    result = _scan(repo, environment=environment)
+
+    assert result.returncode == 2
+    assert result.stdout == "PUBLIC_HISTORY_SENSITIVE_SCAN=FAIL\nREASON=GIT_LAUNCH_FAILED\n"
+    assert result.stderr == ""
+    _assert_safe_output(result, secret)
+
+
+def test_invalid_object_identifier_bytes_have_stable_safe_metadata(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    history = _load(SCRIPT, "qian_public_history_invalid_object")
+    secret = _credential()
+
+    monkeypatch.setattr(history, "_validate_repository", lambda repo: None)
+    monkeypatch.setattr(history, "_git", lambda repo, *args: b"\xff\n")
+
+    assert history.main(["--repo", "safe-repository"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "PUBLIC_HISTORY_SENSITIVE_SCAN=FAIL\nREASON=OBJECT_ID_DECODE_FAILED\n"
+    assert captured.err == ""
+    _assert_safe_output(
+        subprocess.CompletedProcess([], 2, captured.out, captured.err), secret
+    )
 
 
 def test_current_and_history_scanners_expose_identical_pattern_names() -> None:

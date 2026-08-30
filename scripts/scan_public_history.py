@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
@@ -19,11 +20,14 @@ class ScanError(Exception):
 
 
 def _git(repo: Path, *args: str) -> bytes:
-    completed = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=False,
-        capture_output=True,
-    )
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=False,
+            capture_output=True,
+        )
+    except OSError as error:
+        raise ScanError("GIT_LAUNCH_FAILED") from error
     if completed.returncode:
         raise ScanError("GIT_COMMAND_FAILED")
     return completed.stdout
@@ -42,12 +46,14 @@ def _validate_repository(repo: Path) -> None:
         raise ScanError("REPOSITORY_NOT_FOUND")
     if not repo.is_dir():
         raise ScanError("NOT_GIT_REPOSITORY")
-    completed = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "--is-inside-work-tree"],
-        check=False,
-        capture_output=True,
-    )
-    if completed.returncode or completed.stdout.strip() != b"true":
+    try:
+        inside_work_tree = _git(repo, "rev-parse", "--is-inside-work-tree").strip()
+        is_bare_repository = _git(repo, "rev-parse", "--is-bare-repository").strip()
+    except ScanError as error:
+        if error.reason == "GIT_COMMAND_FAILED":
+            raise ScanError("NOT_GIT_REPOSITORY") from error
+        raise
+    if inside_work_tree != b"true" and is_bare_repository != b"true":
         raise ScanError("NOT_GIT_REPOSITORY")
     if _git(repo, "rev-parse", "--is-shallow-repository").strip() == b"true":
         raise ScanError("SHALLOW_REPOSITORY")
@@ -60,7 +66,7 @@ def _safe_path(raw_path: bytes) -> str:
         path = raw_path.decode("utf-8")
     except UnicodeDecodeError:
         return "<unsafe-path>"
-    if any(ord(character) < 32 or ord(character) == 127 for character in path):
+    if any(unicodedata.category(character) in {"Cc", "Cf"} for character in path):
         return "<unsafe-path>"
     if any(pattern.search(raw_path) for pattern in PATTERNS.values()):
         return "<unsafe-path>"
@@ -71,19 +77,23 @@ def _matches(content: bytes) -> list[str]:
     return [name for name, pattern in PATTERNS.items() if pattern.search(content)]
 
 
+def _decode_oid(oid: bytes) -> str:
+    try:
+        oid_text = oid.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise ScanError("OBJECT_ID_DECODE_FAILED") from error
+    if not oid_text or any(character not in "0123456789abcdef" for character in oid_text):
+        raise ScanError("OBJECT_ID_INVALID")
+    return oid_text
+
+
 def _object_paths(repo: Path) -> dict[str, bytes]:
     objects: dict[str, bytes] = {}
     for line in _git(repo, "rev-list", "--objects", "--all").splitlines():
         oid, separator, path = line.partition(b" ")
         if not separator and not oid:
             raise ScanError("OBJECT_ENUMERATION_FAILED")
-        try:
-            oid_text = oid.decode("ascii")
-        except UnicodeDecodeError as error:
-            raise ScanError("OBJECT_ENUMERATION_FAILED") from error
-        if not oid_text or any(character not in "0123456789abcdef" for character in oid_text):
-            raise ScanError("OBJECT_ENUMERATION_FAILED")
-        objects.setdefault(oid_text, path)
+        objects.setdefault(_decode_oid(oid), path)
     return objects
 
 
@@ -103,7 +113,7 @@ def _blob_findings(repo: Path) -> list[tuple[str, str, str]]:
 def _commit_findings(repo: Path) -> list[tuple[str, str, str]]:
     findings: list[tuple[str, str, str]] = []
     for oid_bytes in _git(repo, "rev-list", "--all").splitlines():
-        oid = oid_bytes.decode("ascii")
+        oid = _decode_oid(oid_bytes)
         commit = _git(repo, "cat-file", "commit", oid)
         _, separator, message = commit.partition(b"\n\n")
         if not separator:
@@ -113,15 +123,37 @@ def _commit_findings(repo: Path) -> list[tuple[str, str, str]]:
     return findings
 
 
+def _tag_target(tag: bytes) -> str:
+    headers, separator, _ = tag.partition(b"\n\n")
+    if not separator:
+        raise ScanError("OBJECT_READ_FAILED")
+    for header in headers.splitlines():
+        if header.startswith(b"object "):
+            return _decode_oid(header[7:])
+    raise ScanError("OBJECT_READ_FAILED")
+
+
+def _reachable_annotated_tags(repo: Path) -> list[tuple[str, bytes]]:
+    roots = _git(repo, "for-each-ref", "--format=%(objectname)", "refs/").splitlines()
+    pending = [_decode_oid(root) for root in roots]
+    visited: set[str] = set()
+    tags: list[tuple[str, bytes]] = []
+    while pending:
+        oid = pending.pop()
+        if oid in visited:
+            continue
+        visited.add(oid)
+        if _git(repo, "cat-file", "-t", oid).strip() != b"tag":
+            continue
+        tag = _git(repo, "cat-file", "tag", oid)
+        tags.append((oid, tag))
+        pending.append(_tag_target(tag))
+    return tags
+
+
 def _annotated_tag_findings(repo: Path) -> list[tuple[str, str, str]]:
     findings: list[tuple[str, str, str]] = []
-    references = _git(repo, "for-each-ref", "--format=%(objecttype)%00%(objectname)", "refs/tags")
-    for reference in references.splitlines():
-        object_type, separator, oid_bytes = reference.partition(b"\0")
-        if not separator or object_type != b"tag":
-            continue
-        oid = oid_bytes.decode("ascii")
-        tag = _git(repo, "cat-file", "tag", oid)
+    for oid, tag in _reachable_annotated_tags(repo):
         _, separator, message = tag.partition(b"\n\n")
         if not separator:
             raise ScanError("OBJECT_READ_FAILED")
