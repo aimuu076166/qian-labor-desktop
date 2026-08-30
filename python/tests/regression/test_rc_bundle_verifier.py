@@ -160,6 +160,8 @@ def test_platform_manifests_combine_into_sorted_verified_evidence(tmp_path: Path
         [windows], windows_manifest, "windows", "x64", COMMIT,
         "PASS", "PASS", toolchain, workflow, "2026-08-31T00:00:00Z",
     )
+    assert (tmp_path / "SHA256SUMS-macos.txt").is_file()
+    assert (tmp_path / "SHA256SUMS-windows.txt").is_file()
 
     output = tmp_path / "combined"
     combined = manifest.combine_manifests([mac_manifest, windows_manifest], artifacts, output)
@@ -189,8 +191,6 @@ def test_manifest_verification_rejects_checksum_mismatch_without_leaking_content
         {"repository": "owner/repo", "run_id": "123", "run_attempt": "1"},
         "2026-08-31T00:00:00Z",
     )
-    assert (tmp_path / "SHA256SUMS-macos.txt").is_file()
-    assert (tmp_path / "SHA256SUMS-windows.txt").is_file()
     artifact.write_bytes(b"private changed content")
 
     with pytest.raises(manifest.ManifestError) as captured:

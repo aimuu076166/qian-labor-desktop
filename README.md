@@ -128,6 +128,50 @@ cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
 
 `scripts/verify_desktop.py` 启动真实 sidecar 子进程，通过本机 HTTP 调用验证 synthetic Fake Provider 全链、来源追溯与重启后的持久化删除，并检查规则目录仍为 R01—R20 共 20 项。它不应输出 IPC token、材料正文、个人标识或模型密钥。
 
+## v0.1.0-rc.1 无签名打包验收
+
+`.github/workflows/desktop-rc.yml` 只在 `release/` 分支的 Pull Request 或手动 `workflow_dispatch` 时运行高成本打包。它固定使用 Node.js 22、pnpm 9.15.0、Python 3.12 和 Rust 1.98.0，分别生成 macOS ARM64 的 `.app` / `.dmg` 与 Windows x64 的 NSIS 安装程序。候选标签是 `0.1.0-rc.1`；应用内部版本仍为 `0.1.0`。
+
+验收分为四层，不能互相替代：
+
+1. `scripts/verify_desktop.py` 验证源码入口；
+2. `scripts/verify_built_sidecar.py` 验证 PyInstaller 真实二进制、环回绑定、token 鉴权、SQLite、synthetic Fake Provider 全链、R01—R20、来源追溯、删除及退出残留；
+3. `scripts/verify_rc_bundle.py` 检查应用载荷的版本、标识符、CPU 架构、sidecar 数量、禁止文件、敏感内容和构建机路径；
+4. `scripts/smoke_packaged_app.py` 启动 DMG 中或 NSIS 安装后的主程序，要求它启动随包 sidecar、在隔离的临时目录建立 SQLite，并在主程序退出后确认 sidecar PID 不再存活。
+
+打包应用 smoke 仅在显式设置 `QIAN_RC_SMOKE=1` 时生效，并且 `QIAN_RC_SMOKE_DIR` 必须是操作系统临时目录下已存在、名称以 `qian-rc-smoke-` 开头的真实目录；符号链接和越界路径会被拒绝。该模式不暴露 IPC token，不改变普通用户启动路径，也不会把临时数据库写入安装包。
+
+macOS ARM64 本地候选构建示例：
+
+```bash
+python scripts/build_sidecar.py
+python scripts/verify_built_sidecar.py \
+  --binary apps/desktop/src-tauri/binaries/qian-sidecar-aarch64-apple-darwin
+pnpm --dir apps/desktop tauri build --bundles app,dmg --no-sign --ci -- --locked
+```
+
+Windows x64 的 NSIS 候选必须在 Windows x64 环境构建，并使用：
+
+```powershell
+python scripts/build_sidecar.py
+python scripts/verify_built_sidecar.py --binary apps/desktop/src-tauri/binaries/qian-sidecar-x86_64-pc-windows-msvc.exe
+pnpm --dir apps/desktop tauri build --bundles nsis --no-sign --ci -- --locked
+```
+
+最终组合 artifact 保留 14 天，并包含：
+
+```text
+qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.app.tar.gz
+qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.dmg
+qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe
+SHA256SUMS.txt
+BUILD-MANIFEST.json
+```
+
+这些文件没有 Developer ID / Windows Authenticode 签名，也没有 macOS 公证，操作系统可能显示来源或安全警告。macOS 为满足本机执行要求而存在的工具生成 ad-hoc Mach-O 签名不等于 Developer ID 签名。清单必须记录 `signed=false`、`notarized=false`、真实 Provider `NOT_RUN` 和图片输入 `NOT_RUN`。
+
+只有两个平台的 built-sidecar smoke 与 packaged-app smoke 都真实通过，且最终下载产物经独立重算 SHA-256 后一致，RC Pull Request 才能从 Draft 转为 Ready。若 hosted runner 无法可靠执行 GUI/安装后启动验收，对应项必须记录 `NOT_RUN` 并保持 Draft，不能用源码测试、bundle 检查或推测替代 `PASS`。详细字段见 `docs/release/v0.1.0-rc.1-checklist.md`。
+
 ## Real Provider smoke
 
 ```bash
@@ -156,6 +200,7 @@ IMAGE_INPUT=NOT_RUN
 - 尚无 Windows 代码签名；
 - 尚无自动更新；
 - 尚未发布正式签名安装包；
+- `v0.1.0-rc.1` 工作流只产生临时候选 artifact，不创建标签或 GitHub Release；
 - 真实 Provider smoke 需要维护者安全注入 Key；
 - 当前公开仓主要交付源码、测试和可构建工程。
 
