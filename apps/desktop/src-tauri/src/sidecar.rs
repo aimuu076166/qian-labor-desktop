@@ -221,12 +221,23 @@ fn configure_sidecar_process(command: &mut Command) {
 #[cfg(not(windows))]
 fn configure_sidecar_process(_command: &mut Command) {}
 
+fn runtime_smoke_root(requested: &Path, canonical: &Path, windows: bool) -> PathBuf {
+    if windows {
+        requested.to_path_buf()
+    } else {
+        canonical.to_path_buf()
+    }
+}
+
 fn validated_smoke_root(flag: Option<&OsStr>, root: Option<&OsStr>) -> Result<PathBuf, String> {
     if flag != Some(OsStr::new("1")) {
         return Err("RC_SMOKE_FLAG_INVALID".to_string());
     }
     let requested = root.ok_or_else(|| "RC_SMOKE_ROOT_REQUIRED".to_string())?;
     let requested_path = Path::new(requested);
+    if !requested_path.is_absolute() {
+        return Err("RC_SMOKE_ROOT_INVALID".to_string());
+    }
     let metadata = std::fs::symlink_metadata(requested_path)
         .map_err(|_| "RC_SMOKE_ROOT_UNAVAILABLE".to_string())?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
@@ -248,7 +259,14 @@ fn validated_smoke_root(flag: Option<&OsStr>, root: Option<&OsStr>) -> Result<Pa
     if !basename.starts_with(SMOKE_PREFIX) {
         return Err("RC_SMOKE_ROOT_PREFIX_INVALID".to_string());
     }
-    Ok(canonical_root)
+    // std::fs::canonicalize produces a verbatim `\\?\` path on Windows.
+    // Python's SQLite stack receives the already-validated absolute runner
+    // path instead, while other platforms retain the canonical path.
+    Ok(runtime_smoke_root(
+        requested_path,
+        &canonical_root,
+        cfg!(windows),
+    ))
 }
 
 fn configured_smoke_root() -> Result<Option<PathBuf>, String> {
@@ -497,6 +515,15 @@ mod tests {
                 |name| name.starts_with(".qian-sidecar-ready-") && name.ends_with(".json")
             ));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn windows_runtime_smoke_root_avoids_verbatim_canonical_paths() {
+        let requested = Path::new(r"D:\runner-temp\qian-rc-smoke-123");
+        let canonical = Path::new(r"\\?\D:\runner-temp\qian-rc-smoke-123");
+
+        assert_eq!(runtime_smoke_root(requested, canonical, true), requested);
+        assert_eq!(runtime_smoke_root(requested, canonical, false), canonical);
     }
 
     #[test]
