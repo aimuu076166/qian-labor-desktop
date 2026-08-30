@@ -72,6 +72,13 @@ def _assert_no_control_or_format_characters(value: str) -> None:
         assert not any(unicodedata.category(character) in {"Cc", "Cf"} for character in line)
 
 
+def _assert_head_is_not_named_by_a_ref(repo: Path) -> str:
+    head = _git(repo, "rev-parse", "HEAD").stdout.decode().strip()
+    refs = _git(repo, "for-each-ref", "--format=%(objectname)", "refs/").stdout.splitlines()
+    assert head.encode() not in refs
+    return head
+
+
 def test_clean_complete_history_passes(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     _commit(repo, "notes.txt", "ordinary content")
@@ -108,6 +115,48 @@ def test_deleted_credential_remains_reported_from_history(tmp_path: Path) -> Non
     assert result.returncode == 1
     assert "OPENAI_STYLE_API_KEY" in result.stderr
     _assert_safe_output(result, secret)
+
+
+def test_credential_blob_in_unreferenced_detached_head_commit_is_reported(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _commit(repo, "base.txt", "clean")
+    _git(repo, "checkout", "-q", "--detach")
+    secret = _credential()
+    _commit(repo, "detached.txt", secret, "detached content")
+    _assert_head_is_not_named_by_a_ref(repo)
+    blob_oid = _git(repo, "hash-object", "detached.txt").stdout.decode().strip()[:12]
+
+    result = _scan(repo)
+
+    assert result.returncode == 1
+    assert result.stderr == f"PUBLIC_HISTORY_SENSITIVE_SCAN_FAIL=OPENAI_STYLE_API_KEY:{blob_oid}:detached.txt\n"
+    _assert_safe_output(result, secret)
+
+
+def test_credential_message_in_unreferenced_detached_head_commit_is_reported(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _commit(repo, "base.txt", "clean")
+    _git(repo, "checkout", "-q", "--detach")
+    secret = _credential()
+    _commit(repo, "detached.txt", "clean", "detached message " + secret)
+    commit_oid = _assert_head_is_not_named_by_a_ref(repo)[:12]
+
+    result = _scan(repo)
+
+    assert result.returncode == 1
+    assert result.stderr == f"PUBLIC_HISTORY_SENSITIVE_SCAN_FAIL=OPENAI_STYLE_API_KEY:{commit_oid}:COMMIT_MESSAGE\n"
+    _assert_safe_output(result, secret)
+
+
+def test_history_revisions_explicitly_include_a_valid_detached_head(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    _commit(repo, "base.txt", "clean")
+    _git(repo, "checkout", "-q", "--detach")
+    _commit(repo, "detached.txt", "clean")
+    head = _assert_head_is_not_named_by_a_ref(repo)
+    history = _load(SCRIPT, "qian_public_history_detached_head")
+
+    assert history._history_revisions(repo) == ["--all", head]
 
 
 def test_credential_on_secondary_ref_is_reported(tmp_path: Path) -> None:
@@ -340,6 +389,7 @@ def test_invalid_object_identifier_bytes_have_stable_safe_metadata(
     secret = _credential()
 
     monkeypatch.setattr(history, "_validate_repository", lambda repo: None)
+    monkeypatch.setattr(history, "_history_revisions", lambda repo: ["--all"])
     monkeypatch.setattr(history, "_git", lambda repo, *args: b"\xff\n")
 
     assert history.main(["--repo", "safe-repository"]) == 2
@@ -358,6 +408,7 @@ def test_ascii_hex_object_identifier_with_invalid_length_has_stable_safe_metadat
     secret = _credential()
 
     monkeypatch.setattr(history, "_validate_repository", lambda repo: None)
+    monkeypatch.setattr(history, "_history_revisions", lambda repo: ["--all"])
     monkeypatch.setattr(history, "_git", lambda repo, *args: b"deadbeef\n")
 
     assert history.main(["--repo", "safe-repository"]) == 2
