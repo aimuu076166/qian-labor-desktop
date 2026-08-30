@@ -244,6 +244,7 @@ def create_desktop_app(
         status_code=http_status.HTTP_202_ACCEPTED,
     )
     def process_analysis(analysis_id: str) -> dict[str, object]:
+        previous_state: tuple[str, str, int] | None = None
         with database.session() as session:
             analysis = session.get(AnalysisBatch, analysis_id)
             if analysis is None:
@@ -253,23 +254,32 @@ def create_desktop_app(
             )
             if has_file is None:
                 raise HTTPException(409, {"code": "ANALYSIS_HAS_NO_FILES"})
-        try:
-            result = processing_queue.submit(analysis_id)
-        except RuntimeError as error:
-            if str(error) == "DESKTOP_ANALYSIS_BUSY":
-                raise HTTPException(409, {"code": "DESKTOP_ANALYSIS_BUSY"}) from None
-            raise
-        with database.session() as session:
-            analysis = session.get(AnalysisBatch, analysis_id)
-            if analysis is not None and analysis.status in {
-                "created",
-                "uploading",
-                "uploaded",
-            }:
+            if analysis.status in {"created", "uploading", "uploaded"}:
+                previous_state = (analysis.status, analysis.current_stage, analysis.progress)
                 analysis.status = "queued"
                 analysis.current_stage = "queued"
                 analysis.progress = max(1, analysis.progress)
                 session.commit()
+
+        def restore_unsubmitted_state() -> None:
+            if previous_state is None:
+                return
+            with database.session() as session:
+                analysis = session.get(AnalysisBatch, analysis_id)
+                if analysis is not None and analysis.status == "queued":
+                    analysis.status, analysis.current_stage, analysis.progress = previous_state
+                    session.commit()
+
+        try:
+            result = processing_queue.submit(analysis_id)
+        except RuntimeError as error:
+            restore_unsubmitted_state()
+            if str(error) == "DESKTOP_ANALYSIS_BUSY":
+                raise HTTPException(409, {"code": "DESKTOP_ANALYSIS_BUSY"}) from None
+            raise
+        except Exception:
+            restore_unsubmitted_state()
+            raise
         return result
 
     @app.get("/api/analyses/{analysis_id}/processing")

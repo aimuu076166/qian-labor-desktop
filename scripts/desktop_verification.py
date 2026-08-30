@@ -24,7 +24,7 @@ from qian_labor.rules.catalog import RULE_IDS
 ROOT = Path(__file__).resolve().parents[1]
 READY_PREFIX = "QIAN_DESKTOP_READY="
 TERMINAL = {"completed", "matching_review", "partial", "failed"}
-PROCESSING_TIMEOUT_SECONDS = 90
+PROCESSING_TIMEOUT_SECONDS = 30
 MARKERS = (
     "SIDECAR_BOOT=PASS",
     "LOOPBACK_ONLY=PASS",
