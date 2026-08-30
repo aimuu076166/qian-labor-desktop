@@ -162,6 +162,22 @@ Run: `python/.venv/bin/python -m pytest -q python/tests`
 
 Run: `python/.venv/bin/python -m compileall -q python/src python/tests scripts`
 
+Run: `python/.venv/bin/python scripts/verify_desktop.py`
+
+Run with `AI_API_KEY`, `ZAI_API_KEY`, `ZHIPU_API_KEY`, `BIGMODEL_API_KEY`, `REAL_PROVIDER_SMOKE_API_KEY`, `PII_HASH_PEPPER`, and `REAL_PROVIDER_SMOKE_PII_HASH_PEPPER` all set to empty strings: `python/.venv/bin/python scripts/real_provider_smoke.py`
+
+Expected: `REAL_PROVIDER_SMOKE=NOT_RUN` and `REASON=AI_API_KEY_MISSING`.
+
+Run: `pnpm --dir apps/desktop lint`
+
+Run: `pnpm --dir apps/desktop typecheck`
+
+Run: `pnpm --dir apps/desktop build`
+
+Run: `python/.venv/bin/python -m pip install -e './python[build]'`
+
+Run: `python/.venv/bin/python scripts/build_sidecar.py`
+
 Run: `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all --check`
 
 Run: `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked`
@@ -176,7 +192,7 @@ Run: `python/.venv/bin/python scripts/scan_public_history.py --repo .`
 
 Run: `git diff --check origin/chore/complete-public-migration...HEAD`
 
-Expected: every command exits 0; frontend and Python test counts are recorded; neither scanner reports a finding; the lockfile and working tree remain unchanged.
+Expected: every gate exits 0; real-provider smoke remains NOT_RUN for the explicit missing-key reason; frontend and Python test counts are recorded; sidecar verification/build succeeds; neither scanner reports a finding; Cargo.lock remains unchanged. Remove only ignored/generated sidecar build outputs after the Rust commands, and confirm no generated artifact is staged.
 
 - [ ] Push only `HEAD:chore/complete-public-migration` without force, then fetch and prove the remote branch head and tree match the verified local commit.
 
