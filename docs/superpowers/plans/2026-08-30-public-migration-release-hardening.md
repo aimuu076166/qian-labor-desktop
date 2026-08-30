@@ -73,14 +73,13 @@ Commit: `test(security): add public history secret scan`
 - Create: `apps/desktop/src-tauri/Cargo.lock`
 - Create: `rust-toolchain.toml`
 - Create: `python/tests/regression/test_reproducible_build_config.py`
-- Modify: `.github/workflows/desktop-ci.yml`
 
-- [ ] Write configuration regression tests that require a tracked `apps/desktop/src-tauri/Cargo.lock`, an explicit Rust `1.98.0` pin, `--locked` on every CI Cargo build/test/check command, a lockfile-diff gate after Cargo commands, `cargo fmt --check`, and Python `compileall`. Extend this test for the full-history checkout and sixth job in Task 3.
-- [ ] Run the configuration test before changing lock/toolchain/workflow files and record the expected failure for the missing lockfile and missing CI gates.
+- [ ] Write configuration regression tests that require `apps/desktop/src-tauri/Cargo.lock`, prove it is not ignored, validate that it resolves the desktop crate, and require a root `rust-toolchain.toml` candidate pin with channel `1.98.0`, the minimal profile, and rustfmt. Extend this file with CI and README assertions in Task 3.
+- [ ] Run the configuration test before creating the lock/toolchain files and record the expected failure for the absent controls.
 
 Run: `python/.venv/bin/python -m pytest -q python/tests/regression/test_reproducible_build_config.py`
 
-Expected: FAIL on the intentionally absent reproducibility controls.
+Expected: FAIL because Cargo.lock and the toolchain pin are intentionally absent.
 
 - [ ] Generate `apps/desktop/src-tauri/Cargo.lock` with Rust/Cargo 1.98.0 from the existing manifest and verify `.gitignore` does not suppress it.
 
@@ -88,10 +87,8 @@ Run: `cargo generate-lockfile --manifest-path apps/desktop/src-tauri/Cargo.toml`
 
 Expected: exit 0 and a tracked lockfile candidate.
 
-- [ ] Add `rust-toolchain.toml` with channel `1.98.0`, the minimal profile, and the rustfmt component. Configure every Rust GitHub Actions job to use exactly the same toolchain and component.
-- [ ] Change all CI Cargo test/check/build invocations, including the Tauri package builds, to use `--locked`; add `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check`; add `git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock` after Cargo dependency/build activity so lockfile mutation is a hard failure.
-- [ ] Add `python -m compileall -q python/src python/tests scripts` as a blocking Python-sidecar step.
-- [ ] Run the focused configuration test and Rust formatting/build suites.
+- [ ] Add `rust-toolchain.toml` with candidate channel `1.98.0`, the minimal profile, and the rustfmt component. Treat the version as provisional until Task 5 proves it on Linux, macOS ARM64, and Windows x64.
+- [ ] Stage Cargo.lock before the green configuration-test run so the test can prove it is a tracked release input, then run the focused configuration test and local locked Rust suites with the candidate toolchain.
 
 Run: `python/.venv/bin/python -m pytest -q python/tests/regression/test_reproducible_build_config.py`
 
@@ -103,7 +100,7 @@ Run: `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked`
 
 Expected: all commands PASS and the lockfile remains unchanged.
 
-- [ ] Commit the lockfile, pin, workflow reproducibility changes, and their regression test together.
+- [ ] Commit only the lockfile, candidate toolchain pin, and their regression test.
 
 Commit: `build(rust): lock desktop dependencies and toolchain`
 
@@ -117,10 +114,16 @@ Commit: `build(rust): lock desktop dependencies and toolchain`
 - Modify: `README.md`
 - Modify: `python/tests/regression/test_reproducible_build_config.py`
 
+- [ ] Extend the configuration test first so it requires the six exact job IDs/names, full-history checkout, scanner command, compile gate, format gate, toolchain agreement, `--locked` on every Cargo test/check/Tauri package build, lockfile-diff checks after both package builds, and locked README commands. Run it and record the expected failure against the five-job workflow and old README.
+- [ ] Configure all three Rust jobs to use the candidate `1.98.0` toolchain and rustfmt component. Change all CI Cargo test/check/build invocations, including both Tauri package builds, to use `--locked`; add `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check`; add `git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock` immediately after each package build.
+- [ ] Add `python -m compileall -q python/src python/tests scripts` as a blocking Python-sidecar step.
 - [ ] Add a separate `public-history-security` job with `actions/checkout@v4` and `fetch-depth: 0`, Python 3.12 setup, the focused security regression tests, and `python scripts/scan_public_history.py --repo .` as blocking steps.
 - [ ] Keep the existing five job names stable (`frontend`, `python-sidecar`, `tauri-rust`, `macos-arm64-build`, `windows-x64-build`) and add only `public-history-security`, producing an exact six-job matrix.
-- [ ] Make the workflow regression test assert the six exact job IDs/names, full-history checkout, scanner command, compile gate, format gate, toolchain pin, `--locked`, and lockfile-diff checks.
-- [ ] Update the README prerequisites and verification commands to state that Rust 1.98.0 is pinned, Cargo.lock is committed, all Cargo verification is locked, compileall and rustfmt are gates, and the public-history scanner requires a complete fetched history.
+- [ ] Commit the workflow and CI-focused regression assertions after the non-documentation checks pass.
+
+Commit: `ci: enforce reproducible migration verification`
+
+- [ ] Update the README prerequisites and verification commands to state that Rust 1.98.0 is the candidate pinned toolchain pending the new three-platform result, Cargo.lock is committed, all Cargo verification is locked, compileall and rustfmt are gates, and the public-history scanner requires a complete fetched history.
 - [ ] Run README/link and workflow regression checks plus both scanner entry points.
 
 Run: `python/.venv/bin/python -m pytest -q python/tests/regression/test_reproducible_build_config.py python/tests/regression/test_public_history_scan.py python/tests/regression/test_sensitive_scan.py`
@@ -131,9 +134,9 @@ Run: `python/.venv/bin/python scripts/scan_public_history.py --repo .`
 
 Expected: all tests and scanners PASS.
 
-- [ ] Commit the CI and documentation layer after confirming the diff contains no product logic.
+- [ ] Commit the README and its focused regression assertion separately after confirming it makes no unsupported reproducibility claim.
 
-Commit: `ci: enforce reproducible migration verification`
+Commit: `docs: document public migration hardening`
 
 ---
 
