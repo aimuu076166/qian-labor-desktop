@@ -16,6 +16,7 @@ from typing import Iterable
 
 APP_VERSION = "0.1.0"
 RC_LABEL = "0.1.0-rc.1"
+PRODUCT = "qian-labor-desktop"
 MAC_APP_NAME = "qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.app.tar.gz"
 MAC_DMG_NAME = "qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.dmg"
 WINDOWS_NSIS_NAME = "qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe"
@@ -28,6 +29,7 @@ REQUIRED_ARTIFACT_FIELDS = {
     "sha256",
     "built_sidecar_smoke",
     "packaged_app_smoke",
+    "packaged_app_smoke_reason",
     "built_at",
 }
 
@@ -60,6 +62,7 @@ def _artifact_entry(
     architecture: str,
     built_sidecar_smoke: str,
     packaged_app_smoke: str,
+    packaged_app_smoke_reason: str | None,
     built_at: str,
 ) -> dict[str, object]:
     if not path.is_file() or path.is_symlink():
@@ -76,6 +79,7 @@ def _artifact_entry(
         "sha256": _sha256(path),
         "built_sidecar_smoke": built_sidecar_smoke,
         "packaged_app_smoke": packaged_app_smoke,
+        "packaged_app_smoke_reason": packaged_app_smoke_reason,
         "built_at": built_at,
     }
 
@@ -102,6 +106,7 @@ def create_platform_manifest(
     toolchain: dict[str, str],
     workflow: dict[str, str],
     built_at: str,
+    packaged_app_smoke_reason: str | None = None,
 ) -> dict[str, object]:
     if not re.fullmatch(r"[0-9a-f]{40}", git_commit):
         raise ManifestError("COMMIT_INVALID")
@@ -109,6 +114,13 @@ def create_platform_manifest(
         raise ManifestError("BUILT_SIDECAR_SMOKE_INVALID")
     if packaged_app_smoke not in {"PASS", "NOT_RUN"}:
         raise ManifestError("PACKAGED_APP_SMOKE_INVALID")
+    if packaged_app_smoke == "PASS" and packaged_app_smoke_reason is not None:
+        raise ManifestError("PACKAGED_APP_SMOKE_REASON_INVALID")
+    if packaged_app_smoke == "NOT_RUN" and (
+        packaged_app_smoke_reason is None
+        or not re.fullmatch(r"[A-Z0-9_:-]{3,160}", packaged_app_smoke_reason)
+    ):
+        raise ManifestError("PACKAGED_APP_SMOKE_REASON_REQUIRED")
     if set(toolchain) != {"node", "pnpm", "python", "rustc"} or not all(toolchain.values()):
         raise ManifestError("TOOLCHAIN_INVALID")
     if set(workflow) != {"repository", "run_id", "run_attempt"} or not all(workflow.values()):
@@ -124,12 +136,14 @@ def create_platform_manifest(
             architecture,
             built_sidecar_smoke,
             packaged_app_smoke,
+            packaged_app_smoke_reason,
             built_at,
         )
         for path in sorted(artifacts, key=lambda value: value.name)
     ]
     payload: dict[str, object] = {
         "schema_version": 1,
+        "product": PRODUCT,
         "app_version": APP_VERSION,
         "rc_label": RC_LABEL,
         "git_commit": git_commit,
@@ -141,6 +155,7 @@ def create_platform_manifest(
         "architecture": architecture,
         "built_sidecar_smoke": built_sidecar_smoke,
         "packaged_app_smoke": packaged_app_smoke,
+        "packaged_app_smoke_reason": packaged_app_smoke_reason,
         "toolchain": toolchain,
         "workflow": workflow,
         "built_at": built_at,
@@ -161,6 +176,7 @@ def _read_manifest(path: Path) -> dict[str, object]:
         raise ManifestError("MANIFEST_INVALID")
     required = {
         "schema_version",
+        "product",
         "app_version",
         "rc_label",
         "git_commit",
@@ -172,7 +188,11 @@ def _read_manifest(path: Path) -> dict[str, object]:
     }
     if not required.issubset(payload):
         raise ManifestError("MANIFEST_FIELD_MISSING")
-    if payload["schema_version"] != 1 or payload["app_version"] != APP_VERSION:
+    if (
+        payload["schema_version"] != 1
+        or payload["product"] != PRODUCT
+        or payload["app_version"] != APP_VERSION
+    ):
         raise ManifestError("MANIFEST_VALUE_INVALID")
     if payload["rc_label"] != RC_LABEL or payload["signed"] is not False:
         raise ManifestError("MANIFEST_VALUE_INVALID")
@@ -210,6 +230,13 @@ def _validate_entry(entry: object, root: Path) -> tuple[dict[str, object], Path]
         raise ManifestError("BUILT_SIDECAR_SMOKE_INVALID")
     if entry["packaged_app_smoke"] not in {"PASS", "NOT_RUN"}:
         raise ManifestError("PACKAGED_APP_SMOKE_INVALID")
+    reason = entry["packaged_app_smoke_reason"]
+    if entry["packaged_app_smoke"] == "PASS" and reason is not None:
+        raise ManifestError("PACKAGED_APP_SMOKE_REASON_INVALID")
+    if entry["packaged_app_smoke"] == "NOT_RUN" and (
+        not isinstance(reason, str) or not re.fullmatch(r"[A-Z0-9_:-]{3,160}", reason)
+    ):
+        raise ManifestError("PACKAGED_APP_SMOKE_REASON_REQUIRED")
     return entry, path
 
 
@@ -245,6 +272,7 @@ def combine_manifests(
         shutil.copy2(source, output_dir / str(entry["artifact_name"]))
     combined: dict[str, object] = {
         "schema_version": 1,
+        "product": PRODUCT,
         "app_version": APP_VERSION,
         "rc_label": RC_LABEL,
         "git_commit": next(iter(commits)),
@@ -257,6 +285,8 @@ def combine_manifests(
             {
                 "platform": payload.get("platform"),
                 "architecture": payload.get("architecture"),
+                "packaged_app_smoke": payload.get("packaged_app_smoke"),
+                "packaged_app_smoke_reason": payload.get("packaged_app_smoke_reason"),
                 "toolchain": payload.get("toolchain"),
                 "workflow": payload.get("workflow"),
             }
@@ -332,6 +362,7 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--output", type=Path, required=True)
     create.add_argument("--built-sidecar-smoke", choices=("PASS",), required=True)
     create.add_argument("--packaged-app-smoke", choices=("PASS", "NOT_RUN"), required=True)
+    create.add_argument("--packaged-app-smoke-reason")
     combine = commands.add_parser("combine")
     combine.add_argument("--manifest", type=Path, action="append", required=True)
     combine.add_argument("--artifact-root", type=Path, required=True)
@@ -358,6 +389,7 @@ def main() -> int:
                 toolchain,
                 workflow,
                 built_at,
+                args.packaged_app_smoke_reason,
             )
         elif args.command == "combine":
             combine_manifests(args.manifest, args.artifact_root, args.output_dir)

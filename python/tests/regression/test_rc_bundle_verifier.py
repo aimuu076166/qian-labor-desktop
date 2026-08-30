@@ -99,6 +99,39 @@ def test_bundle_verifier_rejects_wrong_architecture(
     assert captured.value.code == expected_code
 
 
+def test_bundle_verifier_rejects_a_missing_sidecar(tmp_path: Path) -> None:
+    verifier = _load("verify_rc_bundle")
+    app = _mac_app(tmp_path)
+    (app / "Contents" / "MacOS" / "qian-sidecar").unlink()
+
+    with pytest.raises(verifier.BundleVerificationError) as captured:
+        verifier.verify_payload(app, "macos", CONFIG)
+
+    assert captured.value.code == "SIDECAR_COUNT_INVALID"
+
+
+def test_bundle_verifier_rejects_a_sidecar_for_another_platform(tmp_path: Path) -> None:
+    verifier = _load("verify_rc_bundle")
+    app = _mac_app(tmp_path)
+    _write_pe(app / "Contents" / "MacOS" / "qian-sidecar-x86_64-pc-windows-msvc.exe")
+
+    with pytest.raises(verifier.BundleVerificationError) as captured:
+        verifier.verify_payload(app, "macos", CONFIG)
+
+    assert captured.value.code == "SIDECAR_COUNT_INVALID"
+
+
+def test_windows_bundle_rejects_a_macos_sidecar(tmp_path: Path) -> None:
+    verifier = _load("verify_rc_bundle")
+    payload = _windows_payload(tmp_path)
+    (payload / "qian-sidecar").write_bytes(b"mac sidecar")
+
+    with pytest.raises(verifier.BundleVerificationError) as captured:
+        verifier.verify_payload(payload, "windows", CONFIG, verify_windows_version=False)
+
+    assert captured.value.code == "SIDECAR_COUNT_INVALID"
+
+
 @pytest.mark.parametrize("filename", [".env", "private.sqlite", "run.log", "state.cache", "fixture.json"])
 def test_bundle_verifier_rejects_prohibited_payload_files(
     tmp_path: Path, filename: str
@@ -138,6 +171,21 @@ def test_bundle_verifier_redacts_sensitive_or_build_path_matches(
     assert leaked_text not in str(captured.value)
 
 
+def test_bundle_error_never_echoes_a_control_character_or_secret_path(tmp_path: Path) -> None:
+    verifier = _load("verify_rc_bundle")
+    app = _mac_app(tmp_path)
+    secret_component = "private-secret-name\nsecond-line"
+    unsafe = app / "Contents" / "Resources" / secret_component
+    unsafe.mkdir(parents=True)
+    (unsafe / ".env").write_text("redacted", encoding="utf-8")
+
+    with pytest.raises(verifier.BundleVerificationError) as captured:
+        verifier.verify_payload(app, "macos", CONFIG)
+
+    assert captured.value.code == "PROHIBITED_PAYLOAD_FILE"
+    assert secret_component not in str(captured.value)
+
+
 def test_platform_manifests_combine_into_sorted_verified_evidence(tmp_path: Path) -> None:
     manifest = _load("rc_manifest")
     artifacts = tmp_path / "artifacts"
@@ -167,6 +215,7 @@ def test_platform_manifests_combine_into_sorted_verified_evidence(tmp_path: Path
     combined = manifest.combine_manifests([mac_manifest, windows_manifest], artifacts, output)
 
     assert combined["git_commit"] == COMMIT
+    assert combined["product"] == "qian-labor-desktop"
     assert combined["signed"] is False
     assert combined["notarized"] is False
     assert combined["real_provider_smoke"] == "NOT_RUN"
@@ -223,6 +272,34 @@ def test_manifest_validation_rejects_invalid_evidence(tmp_path: Path, mutation: 
 
     with pytest.raises(manifest.ManifestError):
         manifest.combine_manifests([path], tmp_path, tmp_path / "out")
+
+
+def test_not_run_packaged_smoke_requires_a_stable_technical_reason(tmp_path: Path) -> None:
+    manifest = _load("rc_manifest")
+    artifact = tmp_path / "qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe"
+    artifact.write_bytes(b"installer")
+    arguments = (
+        [artifact],
+        tmp_path / "platform.json",
+        "windows",
+        "x64",
+        COMMIT,
+        "PASS",
+        "NOT_RUN",
+        {"node": "v22", "pnpm": "9.15.0", "python": "3.12", "rustc": "1.98.0"},
+        {"repository": "owner/repo", "run_id": "123", "run_attempt": "1"},
+        "2026-08-31T00:00:00Z",
+    )
+
+    with pytest.raises(manifest.ManifestError) as captured:
+        manifest.create_platform_manifest(*arguments)
+
+    assert captured.value.code == "PACKAGED_APP_SMOKE_REASON_REQUIRED"
+    payload = manifest.create_platform_manifest(
+        *arguments,
+        packaged_app_smoke_reason="HOSTED_RUNNER_GUI_UNAVAILABLE",
+    )
+    assert payload["packaged_app_smoke_reason"] == "HOSTED_RUNNER_GUI_UNAVAILABLE"
 
 
 def test_packaged_smoke_result_requires_database_and_non_sensitive_pid() -> None:

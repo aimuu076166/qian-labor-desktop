@@ -47,6 +47,7 @@ def test_rc_platform_jobs_pin_tools_and_execute_real_acceptance() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     for name in ("macos-arm64-rc", "windows-x64-rc"):
         block = _job_block(workflow, name)
+        assert 'CI: "true"' in block
         for required in (
             "actions/checkout@v4",
             "pnpm/action-setup@v4",
@@ -94,4 +95,3 @@ def test_rc_manifest_job_downloads_and_reverifies_platform_artifacts() -> None:
         "SHA256SUMS.txt",
     ):
         assert filename in block
-

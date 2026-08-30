@@ -25,6 +25,7 @@ jobs:
       startsWith(github.head_ref, 'release/')
     runs-on: macos-15
     env:
+      CI: "true"
       RC_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
@@ -133,6 +134,7 @@ jobs:
       startsWith(github.head_ref, 'release/')
     runs-on: windows-latest
     env:
+      CI: "true"
       RC_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4

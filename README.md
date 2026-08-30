@@ -132,6 +132,8 @@ cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
 
 `.github/workflows/desktop-rc.yml` 只在 `release/` 分支的 Pull Request 或手动 `workflow_dispatch` 时运行高成本打包。它固定使用 Node.js 22、pnpm 9.15.0、Python 3.12 和 Rust 1.98.0，分别生成 macOS ARM64 的 `.app` / `.dmg` 与 Windows x64 的 NSIS 安装程序。候选标签是 `0.1.0-rc.1`；应用内部版本仍为 `0.1.0`。
 
+候选文件从该 Pull Request 的 GitHub Actions `desktop-rc` run 下载；优先下载最终的 `qian-labor-desktop-0.1.0-rc.1-unsigned` 汇总 artifact，而不是把平台 job 的中间 artifact 当作正式候选。当前候选只供内部 synthetic 测试，不建议直接导入真实企业或员工资料。
+
 验收分为四层，不能互相替代：
 
 1. `scripts/verify_desktop.py` 验证源码入口；
@@ -169,6 +171,16 @@ BUILD-MANIFEST.json
 ```
 
 这些文件没有 Developer ID / Windows Authenticode 签名，也没有 macOS 公证，操作系统可能显示来源或安全警告。macOS 为满足本机执行要求而存在的工具生成 ad-hoc Mach-O 签名不等于 Developer ID 签名。清单必须记录 `signed=false`、`notarized=false`、真实 Provider `NOT_RUN` 和图片输入 `NOT_RUN`。
+
+下载后应先在同一目录核对清单。macOS/Linux 可运行：
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
+
+Windows PowerShell 可对每个文件运行 `Get-FileHash -Algorithm SHA256 <文件名>`，并逐项与 `SHA256SUMS.txt` 比对。校验失败时不要安装或绕过警告。不要要求测试者全局关闭 Gatekeeper、SmartScreen 或其他操作系统安全功能；如需继续，只能对已核对哈希的单个内部候选按本机安全策略处理。
+
+当前默认 Provider 仍是 Fake。完成 synthetic 验收并退出应用后，如需清除本地测试数据，应先确认主程序和 sidecar 已退出，再删除当前用户下的应用数据目录：macOS 为 `~/Library/Application Support/cn.qianlabor.desktop`，Windows 为 `$env:APPDATA\cn.qianlabor.desktop`。卸载 Windows 应先使用安装程序生成的卸载器，再检查该测试数据目录；清理前应确认目录标识符完全一致，避免删除其他应用数据。
 
 只有两个平台的 built-sidecar smoke 与 packaged-app smoke 都真实通过，且最终下载产物经独立重算 SHA-256 后一致，RC Pull Request 才能从 Draft 转为 Ready。若 hosted runner 无法可靠执行 GUI/安装后启动验收，对应项必须记录 `NOT_RUN` 并保持 Draft，不能用源码测试、bundle 检查或推测替代 `PASS`。详细字段见 `docs/release/v0.1.0-rc.1-checklist.md`。
 

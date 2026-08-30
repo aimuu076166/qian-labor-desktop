@@ -200,11 +200,7 @@ def _verify_macos(payload: Path, config: dict[str, object]) -> None:
     if not isinstance(executable_name, str) or not executable_name:
         raise BundleVerificationError("MAIN_EXECUTABLE_MISSING")
     main = payload / "Contents" / "MacOS" / executable_name
-    sidecars = [
-        path
-        for path in (payload / "Contents" / "MacOS").glob("qian-sidecar*")
-        if path.is_file()
-    ]
+    sidecars = [path for path in payload.rglob("qian-sidecar*") if path.is_file()]
     if not main.is_file():
         raise BundleVerificationError("MAIN_EXECUTABLE_MISSING")
     if len(sidecars) != 1:
@@ -216,8 +212,8 @@ def _verify_macos(payload: Path, config: dict[str, object]) -> None:
 def _verify_windows(
     payload: Path, config: dict[str, object], *, verify_windows_version: bool
 ) -> None:
-    sidecars = [path for path in payload.rglob("qian-sidecar*.exe") if path.is_file()]
-    if len(sidecars) != 1:
+    sidecars = [path for path in payload.rglob("qian-sidecar*") if path.is_file()]
+    if len(sidecars) != 1 or sidecars[0].suffix.lower() != ".exe":
         raise BundleVerificationError("SIDECAR_COUNT_INVALID")
     candidate_names = {f"{config['productName']}.exe", "qian-labor-desktop.exe"}
     main_candidates = [
@@ -296,4 +292,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
