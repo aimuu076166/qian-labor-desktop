@@ -82,7 +82,9 @@ def _decode_oid(oid: bytes) -> str:
         oid_text = oid.decode("ascii")
     except UnicodeDecodeError as error:
         raise ScanError("OBJECT_ID_DECODE_FAILED") from error
-    if not oid_text or any(character not in "0123456789abcdef" for character in oid_text):
+    if len(oid_text) not in {40, 64} or any(
+        character not in "0123456789abcdef" for character in oid_text
+    ):
         raise ScanError("OBJECT_ID_INVALID")
     return oid_text
 

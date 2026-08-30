@@ -351,6 +351,24 @@ def test_invalid_object_identifier_bytes_have_stable_safe_metadata(
     )
 
 
+def test_ascii_hex_object_identifier_with_invalid_length_has_stable_safe_metadata(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    history = _load(SCRIPT, "qian_public_history_invalid_oid_length")
+    secret = _credential()
+
+    monkeypatch.setattr(history, "_validate_repository", lambda repo: None)
+    monkeypatch.setattr(history, "_git", lambda repo, *args: b"deadbeef\n")
+
+    assert history.main(["--repo", "safe-repository"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == "PUBLIC_HISTORY_SENSITIVE_SCAN=FAIL\nREASON=OBJECT_ID_INVALID\n"
+    assert captured.err == ""
+    _assert_safe_output(
+        subprocess.CompletedProcess([], 2, captured.out, captured.err), secret
+    )
+
+
 def test_current_and_history_scanners_expose_identical_pattern_names() -> None:
     current = _load(CURRENT_SCRIPT, "qian_current_sensitive_scan")
     history = _load(SCRIPT, "qian_public_history_scan")
