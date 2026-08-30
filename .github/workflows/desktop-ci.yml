@@ -156,5 +156,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: python -m pip install -e './python[test]'
       - run: python -m pytest -q python/tests/regression/test_public_history_scan.py
       - run: python scripts/scan_public_history.py --repo .
