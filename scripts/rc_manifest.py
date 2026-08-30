@@ -328,7 +328,18 @@ def verify_combined_manifest(manifest_path: Path, artifact_root: Path) -> dict[s
 
 
 def _command_output(command: list[str]) -> str:
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    executable = shutil.which(command[0])
+    if executable is None:
+        raise ManifestError("TOOLCHAIN_CAPTURE_FAILED")
+    try:
+        completed = subprocess.run(
+            [executable, *command[1:]],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        raise ManifestError("TOOLCHAIN_CAPTURE_FAILED") from error
     value = completed.stdout.strip()
     if completed.returncode != 0 or not value:
         raise ManifestError("TOOLCHAIN_CAPTURE_FAILED")

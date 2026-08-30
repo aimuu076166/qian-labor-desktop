@@ -224,6 +224,22 @@ def test_platform_manifests_combine_into_sorted_verified_evidence(tmp_path: Path
     manifest.verify_combined_manifest(output / "BUILD-MANIFEST.json", artifacts)
 
 
+def test_manifest_toolchain_capture_resolves_windows_command_shims(monkeypatch) -> None:
+    manifest = _load("rc_manifest")
+    observed: list[list[str]] = []
+
+    monkeypatch.setattr(manifest.shutil, "which", lambda name: f"C:/tools/{name}.CMD")
+
+    def fake_run(command, **kwargs):
+        observed.append(command)
+        return manifest.subprocess.CompletedProcess(command, 0, "9.15.0\n", "")
+
+    monkeypatch.setattr(manifest.subprocess, "run", fake_run)
+
+    assert manifest._command_output(["pnpm", "--version"]) == "9.15.0"
+    assert observed == [["C:/tools/pnpm.CMD", "--version"]]
+
+
 def test_manifest_verification_rejects_checksum_mismatch_without_leaking_content(
     tmp_path: Path,
 ) -> None:
