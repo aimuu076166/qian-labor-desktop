@@ -92,7 +92,7 @@ Expected: exit 0 and a tracked lockfile candidate.
 
 Run: `python/.venv/bin/python -m pytest -q python/tests/regression/test_reproducible_build_config.py`
 
-Run: `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check`
+Run: `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all --check`
 
 Run: `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked`
 
@@ -115,7 +115,7 @@ Commit: `build(rust): lock desktop dependencies and toolchain`
 - Modify: `python/tests/regression/test_reproducible_build_config.py`
 
 - [ ] Extend the configuration test first so it requires the six exact job IDs/names, full-history checkout, scanner command, compile gate, format gate, toolchain agreement, `--locked` on every Cargo test/check/Tauri package build, lockfile-diff checks after both package builds, and locked README commands. Run it and record the expected failure against the five-job workflow and old README.
-- [ ] Configure all three Rust jobs to use the candidate `1.98.0` toolchain and rustfmt component. Change all CI Cargo test/check/build invocations, including both Tauri package builds, to use `--locked`; add `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check`; add `git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock` immediately after each package build.
+- [ ] Configure all three Rust jobs to use the candidate `1.98.0` toolchain and rustfmt component. Change all CI Cargo test/check/build invocations, including both Tauri package builds, to use `--locked`; add `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all --check`; add `git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock` immediately after each package build.
 - [ ] Add `python -m compileall -q python/src python/tests scripts` as a blocking Python-sidecar step.
 - [ ] Add a separate `public-history-security` job with `actions/checkout@v4` and `fetch-depth: 0`, Python 3.12 setup, the focused security regression tests, and `python scripts/scan_public_history.py --repo .` as blocking steps.
 - [ ] Keep the existing five job names stable (`frontend`, `python-sidecar`, `tauri-rust`, `macos-arm64-build`, `windows-x64-build`) and add only `public-history-security`, producing an exact six-job matrix.
@@ -162,7 +162,7 @@ Run: `python/.venv/bin/python -m pytest -q python/tests`
 
 Run: `python/.venv/bin/python -m compileall -q python/src python/tests scripts`
 
-Run: `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check`
+Run: `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all --check`
 
 Run: `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --locked`
 
