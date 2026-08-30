@@ -148,17 +148,6 @@ def test_credential_message_in_unreferenced_detached_head_commit_is_reported(tmp
     _assert_safe_output(result, secret)
 
 
-def test_history_revisions_explicitly_include_a_valid_detached_head(tmp_path: Path) -> None:
-    repo = _repo(tmp_path)
-    _commit(repo, "base.txt", "clean")
-    _git(repo, "checkout", "-q", "--detach")
-    _commit(repo, "detached.txt", "clean")
-    head = _assert_head_is_not_named_by_a_ref(repo)
-    history = _load(SCRIPT, "qian_public_history_detached_head")
-
-    assert history._history_revisions(repo) == ["--all", head]
-
-
 def test_credential_on_secondary_ref_is_reported(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     _commit(repo, "main.txt", "clean")
@@ -382,6 +371,27 @@ def test_git_launch_failure_has_stable_safe_metadata(tmp_path: Path) -> None:
     _assert_safe_output(result, secret)
 
 
+def test_missing_reachable_loose_blob_fails_closed_without_leaks(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    secret = _credential()
+    _commit(repo, "runtime-setting.txt", "credential=" + secret)
+    blob_oid = _git(repo, "hash-object", "runtime-setting.txt").stdout.decode().strip()
+    loose_blob = repo / ".git" / "objects" / blob_oid[:2] / blob_oid[2:]
+    assert loose_blob.is_file()
+    loose_blob.unlink()
+
+    result = _scan(repo)
+
+    assert result.returncode == 2
+    assert result.stdout == (
+        "PUBLIC_HISTORY_SENSITIVE_SCAN=FAIL\nREASON=GIT_COMMAND_FAILED\n"
+    )
+    assert "PUBLIC_HISTORY_SENSITIVE_SCAN=PASS" not in result.stdout
+    assert result.stderr == ""
+    assert blob_oid not in result.stdout
+    _assert_safe_output(result, secret)
+
+
 def test_invalid_object_identifier_bytes_have_stable_safe_metadata(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -389,7 +399,6 @@ def test_invalid_object_identifier_bytes_have_stable_safe_metadata(
     secret = _credential()
 
     monkeypatch.setattr(history, "_validate_repository", lambda repo: None)
-    monkeypatch.setattr(history, "_history_revisions", lambda repo: ["--all"])
     monkeypatch.setattr(history, "_git", lambda repo, *args: b"\xff\n")
 
     assert history.main(["--repo", "safe-repository"]) == 2
@@ -408,7 +417,6 @@ def test_ascii_hex_object_identifier_with_invalid_length_has_stable_safe_metadat
     secret = _credential()
 
     monkeypatch.setattr(history, "_validate_repository", lambda repo: None)
-    monkeypatch.setattr(history, "_history_revisions", lambda repo: ["--all"])
     monkeypatch.setattr(history, "_git", lambda repo, *args: b"deadbeef\n")
 
     assert history.main(["--repo", "safe-repository"]) == 2

@@ -89,26 +89,10 @@ def _decode_oid(oid: bytes) -> str:
     return oid_text
 
 
-def _history_revisions(repo: Path) -> list[str]:
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", "HEAD"],
-            check=False,
-            capture_output=True,
-        )
-    except OSError as error:
-        raise ScanError("GIT_LAUNCH_FAILED") from error
-    if completed.returncode == 1:
-        return ["--all"]
-    if completed.returncode:
-        raise ScanError("GIT_COMMAND_FAILED")
-    return ["--all", _decode_oid(completed.stdout.strip())]
-
-
 def _object_paths(repo: Path) -> dict[str, bytes]:
     objects: dict[str, bytes] = {}
     for line in _git(
-        repo, "rev-list", "--objects", "--missing=error", *_history_revisions(repo)
+        repo, "rev-list", "--objects", "--missing=error", "--all"
     ).splitlines():
         oid, separator, path = line.partition(b" ")
         if not separator and not oid:
@@ -132,7 +116,9 @@ def _blob_findings(repo: Path) -> list[tuple[str, str, str]]:
 
 def _commit_findings(repo: Path) -> list[tuple[str, str, str]]:
     findings: list[tuple[str, str, str]] = []
-    for oid_bytes in _git(repo, "rev-list", "--missing=error", *_history_revisions(repo)).splitlines():
+    for oid_bytes in _git(
+        repo, "rev-list", "--missing=error", "--all"
+    ).splitlines():
         oid = _decode_oid(oid_bytes)
         commit = _git(repo, "cat-file", "commit", oid)
         _, separator, message = commit.partition(b"\n\n")
