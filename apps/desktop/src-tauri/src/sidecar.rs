@@ -1,5 +1,8 @@
 use std::ffi::OsStr;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, TryRecvError};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -7,10 +10,6 @@ use anyhow::{anyhow, Context, Result};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_shell::{
-    process::{CommandChild, CommandEvent},
-    ShellExt,
-};
 
 const READY_PREFIX: &str = "QIAN_DESKTOP_READY=";
 const LOOPBACK_HOST: &str = "127.0.0.1";
@@ -34,7 +33,7 @@ pub struct DesktopBackendInfo {
 
 pub struct BackendProcess {
     info: DesktopBackendInfo,
-    child: CommandChild,
+    child: Child,
     data_dir: PathBuf,
     sidecar_pid: u32,
     smoke_root: Option<PathBuf>,
@@ -91,15 +90,28 @@ impl BackendState {
             .lock()
             .map_err(|_| "DESKTOP_BACKEND_STATE_POISONED".to_string())?
             .take();
-        if let Some(process) = process {
+        if let Some(mut process) = process {
             terminate_ready_process(process.sidecar_pid)?;
-            process
-                .child
-                .kill()
-                .map_err(|_| "DESKTOP_BACKEND_STOP_FAILED".to_string())?;
+            stop_child(&mut process.child)?;
         }
         Ok(())
     }
+}
+
+fn stop_child(child: &mut Child) -> Result<(), String> {
+    if child
+        .try_wait()
+        .map_err(|_| "DESKTOP_BACKEND_STOP_FAILED".to_string())?
+        .is_none()
+    {
+        child
+            .kill()
+            .map_err(|_| "DESKTOP_BACKEND_STOP_FAILED".to_string())?;
+        child
+            .wait()
+            .map_err(|_| "DESKTOP_BACKEND_STOP_FAILED".to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -156,6 +168,28 @@ fn random_launch_token() -> String {
     rand::rng().fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+fn bundled_sidecar_path(executable: &Path) -> Result<PathBuf, String> {
+    let directory = executable
+        .parent()
+        .ok_or_else(|| "DESKTOP_EXECUTABLE_DIR_UNAVAILABLE".to_string())?;
+    #[cfg(windows)]
+    let name = "qian-sidecar.exe";
+    #[cfg(not(windows))]
+    let name = "qian-sidecar";
+    Ok(directory.join(name))
+}
+
+#[cfg(windows)]
+fn configure_sidecar_process(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn configure_sidecar_process(_command: &mut Command) {}
 
 fn validated_smoke_root(flag: Option<&OsStr>, root: Option<&OsStr>) -> Result<PathBuf, String> {
     if flag != Some(OsStr::new("1")) {
@@ -234,62 +268,78 @@ pub async fn start_backend(app: AppHandle) -> Result<BackendProcess> {
     std::fs::create_dir_all(&data_dir).context("DESKTOP_APP_DATA_DIR_CREATE_FAILED")?;
 
     let token = random_launch_token();
-    let command = app
-        .shell()
-        .sidecar("qian-sidecar")
-        .context("DESKTOP_SIDECAR_COMMAND_UNAVAILABLE")?
+    let executable = std::env::current_exe().context("DESKTOP_EXECUTABLE_PATH_UNAVAILABLE")?;
+    let sidecar = bundled_sidecar_path(&executable).map_err(anyhow::Error::msg)?;
+    let sidecar_directory = sidecar
+        .parent()
+        .context("DESKTOP_SIDECAR_DIR_UNAVAILABLE")?;
+    let mut command = Command::new(&sidecar);
+    command
+        .current_dir(sidecar_directory)
         .env("QIAN_DESKTOP_DATA_DIR", data_dir.as_os_str())
         .env("QIAN_DESKTOP_TOKEN", &token)
-        .env("QIAN_DESKTOP_PORT", "0");
+        .env("QIAN_DESKTOP_PORT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    configure_sidecar_process(&mut command);
 
-    let (mut receiver, child) = command.spawn().context("DESKTOP_SIDECAR_SPAWN_FAILED")?;
-    let mut child = Some(child);
+    let mut child = command.spawn().context("DESKTOP_SIDECAR_SPAWN_FAILED")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("DESKTOP_SIDECAR_STDOUT_UNAVAILABLE")?;
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let message = line.map_err(|_| ());
+            let failed = message.is_err();
+            if sender.send(message).is_err() || failed {
+                break;
+            }
+        }
+    });
 
-    let ready_result = tokio::time::timeout(Duration::from_secs(15), async {
-        let mut stdout_buffer = String::new();
-        while let Some(event) = receiver.recv().await {
-            match event {
-                CommandEvent::Stdout(bytes) => {
-                    let text = String::from_utf8(bytes)
-                        .map_err(|_| anyhow!("DESKTOP_SIDECAR_STDOUT_INVALID"))?;
-                    stdout_buffer.push_str(&text);
-                    stdout_buffer.push('\n');
-                    while let Some(newline) = stdout_buffer.find('\n') {
-                        let line = stdout_buffer[..newline].trim_end_matches('\r').to_string();
-                        stdout_buffer.drain(..=newline);
-                        if line.starts_with(READY_PREFIX) {
-                            return parse_ready_line(&line).map_err(anyhow::Error::msg);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let ready = loop {
+        match receiver.try_recv() {
+            Ok(Ok(line)) => {
+                if line.starts_with(READY_PREFIX) {
+                    match parse_ready_line(line.trim_end_matches('\r')) {
+                        Ok(ready) => break ready,
+                        Err(error) => {
+                            let _ = stop_child(&mut child);
+                            return Err(anyhow::Error::msg(error));
                         }
                     }
                 }
-                CommandEvent::Terminated(_) => {
-                    return Err(anyhow!("DESKTOP_SIDECAR_TERMINATED_BEFORE_READY"));
-                }
-                CommandEvent::Error(_) => {
-                    return Err(anyhow!("DESKTOP_SIDECAR_EVENT_ERROR"));
-                }
-                CommandEvent::Stderr(_) => {}
-                _ => {}
             }
+            Ok(Err(())) => {
+                let _ = stop_child(&mut child);
+                return Err(anyhow!("DESKTOP_SIDECAR_STDOUT_INVALID"));
+            }
+            Err(TryRecvError::Disconnected) => {
+                let _ = stop_child(&mut child);
+                return Err(anyhow!("DESKTOP_SIDECAR_EVENT_STREAM_CLOSED"));
+            }
+            Err(TryRecvError::Empty) => {}
         }
-        Err(anyhow!("DESKTOP_SIDECAR_EVENT_STREAM_CLOSED"))
-    })
-    .await;
 
-    let ready = match ready_result {
-        Ok(Ok(ready)) => ready,
-        Ok(Err(error)) => {
-            if let Some(process) = child.take() {
-                let _ = process.kill();
+        let exited = match child.try_wait() {
+            Ok(status) => status.is_some(),
+            Err(_) => {
+                let _ = stop_child(&mut child);
+                return Err(anyhow!("DESKTOP_SIDECAR_EVENT_ERROR"));
             }
-            return Err(error);
+        };
+        if exited {
+            return Err(anyhow!("DESKTOP_SIDECAR_TERMINATED_BEFORE_READY"));
         }
-        Err(_) => {
-            if let Some(process) = child.take() {
-                let _ = process.kill();
-            }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = stop_child(&mut child);
             return Err(anyhow!("DESKTOP_SIDECAR_READY_TIMEOUT"));
         }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     };
 
     Ok(BackendProcess {
@@ -297,7 +347,7 @@ pub async fn start_backend(app: AppHandle) -> Result<BackendProcess> {
             base_url: format!("http://{}:{}", ready.host, ready.port),
             token,
         },
-        child: child.expect("child must exist after successful startup"),
+        child,
         data_dir,
         sidecar_pid: ready.pid,
         smoke_root,
@@ -379,6 +429,28 @@ mod tests {
         assert_eq!(second.len(), 64);
         assert!(first.chars().all(|value| value.is_ascii_hexdigit()));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn bundled_sidecar_is_resolved_next_to_the_desktop_executable() {
+        let executable = Path::new("candidate").join(if cfg!(windows) {
+            "qian-labor-desktop.exe"
+        } else {
+            "qian-labor-desktop"
+        });
+        let expected = executable
+            .parent()
+            .expect("candidate directory")
+            .join(if cfg!(windows) {
+                "qian-sidecar.exe"
+            } else {
+                "qian-sidecar"
+            });
+
+        assert_eq!(
+            bundled_sidecar_path(&executable).expect("sidecar path"),
+            expected
+        );
     }
 
     #[test]
