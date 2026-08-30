@@ -296,7 +296,7 @@ def test_desktop_rust_release_inputs_are_tracked_and_resolvable() -> None:
         ],
         cwd=ROOT,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         check=False,
     )
     assert metadata.returncode == 0, metadata.stderr

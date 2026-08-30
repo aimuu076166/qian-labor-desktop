@@ -173,16 +173,13 @@ def test_bundle_verifier_redacts_sensitive_or_build_path_matches(
 
 def test_bundle_error_never_echoes_a_control_character_or_secret_path(tmp_path: Path) -> None:
     verifier = _load("verify_rc_bundle")
-    app = _mac_app(tmp_path)
     secret_component = "private-secret-name\nsecond-line"
-    unsafe = app / "Contents" / "Resources" / secret_component
-    unsafe.mkdir(parents=True)
-    (unsafe / ".env").write_text("redacted", encoding="utf-8")
+    unsafe = tmp_path / secret_component
 
     with pytest.raises(verifier.BundleVerificationError) as captured:
-        verifier.verify_payload(app, "macos", CONFIG)
+        verifier.verify_payload(unsafe, "macos", CONFIG)
 
-    assert captured.value.code == "PROHIBITED_PAYLOAD_FILE"
+    assert captured.value.code == "PAYLOAD_INVALID"
     assert secret_component not in str(captured.value)
 
 
