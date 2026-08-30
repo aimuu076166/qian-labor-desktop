@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import unicodedata
@@ -20,11 +21,23 @@ class ScanError(Exception):
 
 
 def _git(repo: Path, *args: str) -> bytes:
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("GIT_")
+    }
     try:
         completed = subprocess.run(
-            ["git", "-C", str(repo), *args],
+            [
+                "git",
+                "--no-replace-objects",
+                "-c",
+                "core.commitGraph=false",
+                "-C",
+                str(repo),
+                *args,
+            ],
             check=False,
             capture_output=True,
+            env=environment,
         )
     except OSError as error:
         raise ScanError("GIT_LAUNCH_FAILED") from error
@@ -57,6 +70,23 @@ def _validate_repository(repo: Path) -> None:
         raise ScanError("NOT_GIT_REPOSITORY")
     if _git(repo, "rev-parse", "--is-shallow-repository").strip() == b"true":
         raise ScanError("SHALLOW_REPOSITORY")
+    grafts_path = os.fsdecode(
+        _git(
+            repo,
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/grafts",
+        ).removesuffix(b"\n")
+    )
+    try:
+        os.lstat(grafts_path)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as error:
+        raise ScanError("GIT_GRAFTS_CHECK_FAILED") from error
+    else:
+        raise ScanError("GIT_GRAFTS_PRESENT")
 
 
 def _safe_path(raw_path: bytes) -> str:
@@ -66,7 +96,10 @@ def _safe_path(raw_path: bytes) -> str:
         path = raw_path.decode("utf-8")
     except UnicodeDecodeError:
         return "<unsafe-path>"
-    if any(unicodedata.category(character) in {"Cc", "Cf"} for character in path):
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in path
+    ):
         return "<unsafe-path>"
     if any(pattern.search(raw_path) for pattern in PATTERNS.values()):
         return "<unsafe-path>"
