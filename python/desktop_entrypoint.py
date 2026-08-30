@@ -15,6 +15,8 @@ from qian_labor.desktop.app import create_desktop_app
 
 HOST = "127.0.0.1"
 READY_PREFIX = "QIAN_DESKTOP_READY="
+READY_FILE_ENV = "QIAN_DESKTOP_READY_FILE"
+READY_FILE_PREFIX = ".qian-sidecar-ready-"
 
 
 def _required_env(name: str) -> str:
@@ -43,9 +45,39 @@ def _bind_loopback(port: int) -> socket.socket:
     return listener
 
 
+def _configured_ready_file(data_dir: Path) -> Path | None:
+    raw = os.environ.get(READY_FILE_ENV, "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if path.parent.resolve() != data_dir.resolve():
+        raise RuntimeError("QIAN_DESKTOP_READY_FILE_INVALID")
+    if not path.name.startswith(READY_FILE_PREFIX) or path.suffix != ".json":
+        raise RuntimeError("QIAN_DESKTOP_READY_FILE_INVALID")
+    if path.exists() or path.is_symlink():
+        raise RuntimeError("QIAN_DESKTOP_READY_FILE_INVALID")
+    return path
+
+
+def _write_ready_file(path: Path, payload: bytes) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    try:
+        descriptor = os.open(temporary, flags, 0o600)
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def main() -> int:
-    data_dir = Path(_required_env("QIAN_DESKTOP_DATA_DIR"))
+    data_dir = Path(_required_env("QIAN_DESKTOP_DATA_DIR")).expanduser().resolve()
     token = _required_env("QIAN_DESKTOP_TOKEN")
+    ready_file = _configured_ready_file(data_dir)
     listener = _bind_loopback(_configured_port())
     port = int(listener.getsockname()[1])
 
@@ -74,15 +106,24 @@ def main() -> int:
         listener.close()
         raise RuntimeError("DESKTOP_SIDECAR_START_FAILED")
 
-    print(
-        READY_PREFIX
-        + json.dumps(
-            {"host": HOST, "port": port, "pid": os.getpid()},
-            separators=(",", ":"),
-            sort_keys=True,
-        ),
-        flush=True,
-    )
+    ready_payload = json.dumps(
+        {"host": HOST, "port": port, "pid": os.getpid()},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    try:
+        if ready_file is not None:
+            _write_ready_file(ready_file, ready_payload)
+        else:
+            print(
+                READY_PREFIX + ready_payload.decode("utf-8"),
+                flush=True,
+            )
+    except Exception:
+        server.should_exit = True
+        thread.join(timeout=5)
+        listener.close()
+        raise
 
     try:
         while thread.is_alive():

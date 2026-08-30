@@ -1,8 +1,6 @@
 use std::ffi::OsStr;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, TryRecvError};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -11,7 +9,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
-const READY_PREFIX: &str = "QIAN_DESKTOP_READY=";
+const READY_FILE_PREFIX: &str = ".qian-sidecar-ready-";
 const LOOPBACK_HOST: &str = "127.0.0.1";
 const SMOKE_FLAG: &str = "QIAN_RC_SMOKE";
 const SMOKE_ROOT: &str = "QIAN_RC_SMOKE_DIR";
@@ -148,17 +146,17 @@ fn terminate_ready_process(pid: u32) -> Result<(), String> {
     }
 }
 
-pub fn parse_ready_line(line: &str) -> Result<SidecarReady, String> {
-    let payload = line
-        .strip_prefix(READY_PREFIX)
-        .ok_or_else(|| "DESKTOP_READY_PREFIX_INVALID".to_string())?;
+fn parse_ready_payload(payload: &[u8]) -> Result<SidecarReady, String> {
     let ready: SidecarReady =
-        serde_json::from_str(payload).map_err(|_| "DESKTOP_READY_JSON_INVALID".to_string())?;
+        serde_json::from_slice(payload).map_err(|_| "DESKTOP_READY_JSON_INVALID".to_string())?;
     if ready.host != LOOPBACK_HOST {
         return Err("DESKTOP_READY_HOST_INVALID".to_string());
     }
     if ready.port == 0 {
         return Err("DESKTOP_READY_PORT_INVALID".to_string());
+    }
+    if ready.pid == 0 {
+        return Err("DESKTOP_READY_PID_INVALID".to_string());
     }
     Ok(ready)
 }
@@ -167,6 +165,38 @@ fn random_launch_token() -> String {
     let mut bytes = [0_u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn ready_file_path(data_dir: &Path) -> PathBuf {
+    let mut bytes = [0_u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    let nonce: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    data_dir.join(format!("{READY_FILE_PREFIX}{nonce}.json"))
+}
+
+fn ready_temporary_path(ready_file: &Path) -> PathBuf {
+    let mut name = ready_file.as_os_str().to_os_string();
+    name.push(".tmp");
+    PathBuf::from(name)
+}
+
+fn cleanup_ready_files(ready_file: &Path) {
+    let _ = std::fs::remove_file(ready_file);
+    let _ = std::fs::remove_file(ready_temporary_path(ready_file));
+}
+
+fn read_ready_file(ready_file: &Path) -> Result<Option<Vec<u8>>, String> {
+    let metadata = match std::fs::symlink_metadata(ready_file) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("DESKTOP_READY_FILE_UNAVAILABLE".to_string()),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 1024 {
+        return Err("DESKTOP_READY_FILE_INVALID".to_string());
+    }
+    std::fs::read(ready_file)
+        .map(Some)
+        .map_err(|_| "DESKTOP_READY_FILE_UNAVAILABLE".to_string())
 }
 
 fn bundled_sidecar_path(executable: &Path) -> Result<PathBuf, String> {
@@ -273,56 +303,59 @@ pub async fn start_backend(app: AppHandle) -> Result<BackendProcess> {
     let sidecar_directory = sidecar
         .parent()
         .context("DESKTOP_SIDECAR_DIR_UNAVAILABLE")?;
+    let ready_file = ready_file_path(&data_dir);
+    let ready_temporary = ready_temporary_path(&ready_file);
+    for candidate in [&ready_file, &ready_temporary] {
+        match std::fs::symlink_metadata(candidate) {
+            Ok(_) => return Err(anyhow!("DESKTOP_READY_FILE_ALREADY_EXISTS")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(anyhow!("DESKTOP_READY_FILE_UNAVAILABLE")),
+        }
+    }
     let mut command = Command::new(&sidecar);
     command
         .current_dir(sidecar_directory)
         .env("QIAN_DESKTOP_DATA_DIR", data_dir.as_os_str())
         .env("QIAN_DESKTOP_TOKEN", &token)
         .env("QIAN_DESKTOP_PORT", "0")
+        .env("QIAN_DESKTOP_READY_FILE", ready_file.as_os_str())
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::null());
     configure_sidecar_process(&mut command);
 
     let mut child = command.spawn().context("DESKTOP_SIDECAR_SPAWN_FAILED")?;
-    let stdout = child
-        .stdout
-        .take()
-        .context("DESKTOP_SIDECAR_STDOUT_UNAVAILABLE")?;
-    let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            let message = line.map_err(|_| ());
-            let failed = message.is_err();
-            if sender.send(message).is_err() || failed {
-                break;
-            }
-        }
-    });
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let ready = loop {
-        match receiver.try_recv() {
-            Ok(Ok(line)) => {
-                if line.starts_with(READY_PREFIX) {
-                    match parse_ready_line(line.trim_end_matches('\r')) {
-                        Ok(ready) => break ready,
-                        Err(error) => {
+        match read_ready_file(&ready_file) {
+            Ok(Some(payload)) => match parse_ready_payload(&payload) {
+                Ok(ready) => {
+                    cleanup_ready_files(&ready_file);
+                    let exited = match child.try_wait() {
+                        Ok(status) => status.is_some(),
+                        Err(_) => {
                             let _ = stop_child(&mut child);
-                            return Err(anyhow::Error::msg(error));
+                            return Err(anyhow!("DESKTOP_SIDECAR_EVENT_ERROR"));
                         }
+                    };
+                    if exited {
+                        return Err(anyhow!("DESKTOP_SIDECAR_TERMINATED_BEFORE_READY"));
                     }
+                    break ready;
                 }
-            }
-            Ok(Err(())) => {
+                Err(error) => {
+                    cleanup_ready_files(&ready_file);
+                    let _ = stop_child(&mut child);
+                    return Err(anyhow::Error::msg(error));
+                }
+            },
+            Ok(None) => {}
+            Err(error) => {
+                cleanup_ready_files(&ready_file);
                 let _ = stop_child(&mut child);
-                return Err(anyhow!("DESKTOP_SIDECAR_STDOUT_INVALID"));
+                return Err(anyhow::Error::msg(error));
             }
-            Err(TryRecvError::Disconnected) => {
-                let _ = stop_child(&mut child);
-                return Err(anyhow!("DESKTOP_SIDECAR_EVENT_STREAM_CLOSED"));
-            }
-            Err(TryRecvError::Empty) => {}
         }
 
         let exited = match child.try_wait() {
@@ -333,9 +366,11 @@ pub async fn start_backend(app: AppHandle) -> Result<BackendProcess> {
             }
         };
         if exited {
+            cleanup_ready_files(&ready_file);
             return Err(anyhow!("DESKTOP_SIDECAR_TERMINATED_BEFORE_READY"));
         }
         if tokio::time::Instant::now() >= deadline {
+            cleanup_ready_files(&ready_file);
             let _ = stop_child(&mut child);
             return Err(anyhow!("DESKTOP_SIDECAR_READY_TIMEOUT"));
         }
@@ -398,10 +433,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_only_loopback_ready_lines() {
-        let ready =
-            parse_ready_line(r#"QIAN_DESKTOP_READY={"host":"127.0.0.1","port":43123,"pid":77}"#)
-                .expect("valid loopback READY line");
+    fn parses_only_loopback_ready_payloads() {
+        let ready = parse_ready_payload(br#"{"host":"127.0.0.1","port":43123,"pid":77}"#)
+            .expect("valid loopback READY payload");
         assert_eq!(
             ready,
             SidecarReady {
@@ -411,14 +445,9 @@ mod tests {
             }
         );
 
-        assert!(
-            parse_ready_line(r#"QIAN_DESKTOP_READY={"host":"0.0.0.0","port":43123,"pid":77}"#)
-                .is_err()
-        );
-        assert!(
-            parse_ready_line(r#"QIAN_DESKTOP_READY={"host":"127.0.0.1","port":0,"pid":77}"#)
-                .is_err()
-        );
+        assert!(parse_ready_payload(br#"{"host":"0.0.0.0","port":43123,"pid":77}"#).is_err());
+        assert!(parse_ready_payload(br#"{"host":"127.0.0.1","port":0,"pid":77}"#).is_err());
+        assert!(parse_ready_payload(br#"{"host":"127.0.0.1","port":43123,"pid":0}"#).is_err());
     }
 
     #[test]
@@ -451,6 +480,23 @@ mod tests {
             bundled_sidecar_path(&executable).expect("sidecar path"),
             expected
         );
+    }
+
+    #[test]
+    fn ready_file_is_randomized_inside_the_sidecar_data_directory() {
+        let data_dir = Path::new("candidate-data");
+        let first = ready_file_path(data_dir);
+        let second = ready_file_path(data_dir);
+
+        assert_eq!(first.parent(), Some(data_dir));
+        assert_eq!(second.parent(), Some(data_dir));
+        assert!(first
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(
+                |name| name.starts_with(".qian-sidecar-ready-") && name.ends_with(".json")
+            ));
+        assert_ne!(first, second);
     }
 
     #[test]
