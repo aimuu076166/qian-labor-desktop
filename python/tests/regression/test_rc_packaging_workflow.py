@@ -87,6 +87,8 @@ def test_rc_platform_jobs_pin_tools_and_execute_real_acceptance() -> None:
     assert (
         'verify_built_sidecar.py --binary "$env:QIAN_INSTALLED_SIDECAR"' in windows
     )
+    assert "--cwd-binary-dir" in windows
+    assert "--windows-no-window" in windows
 
 
 def test_rc_manifest_job_downloads_and_reverifies_platform_artifacts() -> None:

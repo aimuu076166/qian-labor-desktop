@@ -232,6 +232,17 @@ jobs:
           --expected-commit "$env:RC_COMMIT"
       - name: Smoke-test the installed Windows sidecar directly
         run: python scripts/verify_built_sidecar.py --binary "$env:QIAN_INSTALLED_SIDECAR"
+      - name: Smoke-test the installed Windows sidecar from its install directory
+        run: >-
+          python scripts/verify_built_sidecar.py
+          --binary "$env:QIAN_INSTALLED_SIDECAR"
+          --cwd-binary-dir
+      - name: Smoke-test the installed Windows sidecar with Tauri process flags
+        run: >-
+          python scripts/verify_built_sidecar.py
+          --binary "$env:QIAN_INSTALLED_SIDECAR"
+          --cwd-binary-dir
+          --windows-no-window
       - name: Smoke-test the installed Windows application
         run: python scripts/smoke_packaged_app.py --app-binary "$env:QIAN_INSTALLED_APP"
       - name: Uninstall the temporary Windows candidate

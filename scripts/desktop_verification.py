@@ -75,13 +75,23 @@ def _write_fixture(path: Path) -> None:
     document.save(path)
 
 
-def _popen_options() -> dict[str, object]:
+def _popen_options(*, windows_no_window: bool = False) -> dict[str, object]:
     if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP
+        if windows_no_window:
+            flags |= subprocess.CREATE_NO_WINDOW
+        return {"creationflags": flags}
     return {"start_new_session": True}
 
 
-def _start_sidecar(command: Sequence[str], data_dir: Path, token: str) -> RunningSidecar:
+def _start_sidecar(
+    command: Sequence[str],
+    data_dir: Path,
+    token: str,
+    *,
+    cwd: Path,
+    windows_no_window: bool,
+) -> RunningSidecar:
     env = {
         **os.environ,
         "AI_PROVIDER": "fake",
@@ -93,13 +103,13 @@ def _start_sidecar(command: Sequence[str], data_dir: Path, token: str) -> Runnin
     try:
         process = subprocess.Popen(
             list(command),
-            cwd=ROOT,
+            cwd=cwd,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
-            **_popen_options(),
+            **_popen_options(windows_no_window=windows_no_window),
         )
     except (FileNotFoundError, PermissionError, OSError) as error:
         raise VerificationError("BINARY_START_FAILED") from error
@@ -218,7 +228,13 @@ def _assert_status(response: httpx.Response, expected: int, code: str) -> None:
         raise VerificationError(code)
 
 
-def verify_command(command: Sequence[str], *, token: str | None = None) -> tuple[str, ...]:
+def verify_command(
+    command: Sequence[str],
+    *,
+    token: str | None = None,
+    cwd: Path | None = None,
+    windows_no_window: bool = False,
+) -> tuple[str, ...]:
     if not command or any(not isinstance(value, str) or not value for value in command):
         raise VerificationError("COMMAND_INVALID")
     running: RunningSidecar | None = None
@@ -231,7 +247,13 @@ def verify_command(command: Sequence[str], *, token: str | None = None) -> tuple
             fixture = temp_path / "fictional-contract.docx"
             _write_fixture(fixture)
 
-            running = _start_sidecar(command, data_dir, launch_token)
+            running = _start_sidecar(
+                command,
+                data_dir,
+                launch_token,
+                cwd=cwd or ROOT,
+                windows_no_window=windows_no_window,
+            )
             with httpx.Client(base_url=running.base_url, timeout=5) as unauthenticated:
                 _assert_status(unauthenticated.get("/health"), 200, "HEALTH_FAILED")
                 _assert_status(unauthenticated.get("/api/status"), 401, "AUTH_BYPASS")
@@ -280,7 +302,13 @@ def verify_command(command: Sequence[str], *, token: str | None = None) -> tuple
             stopped_processes += 1
             running = None
 
-            running = _start_sidecar(command, data_dir, launch_token)
+            running = _start_sidecar(
+                command,
+                data_dir,
+                launch_token,
+                cwd=cwd or ROOT,
+                windows_no_window=windows_no_window,
+            )
             with httpx.Client(
                 base_url=running.base_url,
                 headers={"X-Qian-Desktop-Token": launch_token},
@@ -297,7 +325,13 @@ def verify_command(command: Sequence[str], *, token: str | None = None) -> tuple
             stopped_processes += 1
             running = None
 
-            running = _start_sidecar(command, data_dir, launch_token)
+            running = _start_sidecar(
+                command,
+                data_dir,
+                launch_token,
+                cwd=cwd or ROOT,
+                windows_no_window=windows_no_window,
+            )
             with httpx.Client(
                 base_url=running.base_url,
                 headers={"X-Qian-Desktop-Token": launch_token},
@@ -324,4 +358,3 @@ def verify_command(command: Sequence[str], *, token: str | None = None) -> tuple
     finally:
         if running is not None:
             _stop_sidecar(running)
-
