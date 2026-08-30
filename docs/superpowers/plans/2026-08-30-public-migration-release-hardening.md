@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Harden the existing public-migration pull request so the repository can prove that every fetched public Git object is free of high-confidence credentials, every Rust build uses committed dependency resolution, all source-integrity checks are blocking CI gates, and the final six-job matrix is reproducible from the public repository.
+**Goal:** Harden the existing public-migration pull request so the repository can prove that high-confidence credential patterns are absent from text blobs and commit messages reachable from fetched refs or HEAD and from annotated-tag messages reachable from fetched refs, every Rust build uses committed dependency resolution, all source-integrity checks are blocking CI gates, and the final six-job matrix is reproducible from the public repository.
 
-**Architecture:** Keep the existing Desktop-only product and validation layers unchanged. Add one standard-library Python scanner that traverses fetched Git objects and shares credential-pattern definitions with the current-tree scanner; add regression tests for security and build configuration; commit Cargo's lockfile; pin the validated Rust toolchain; and extend the existing GitHub Actions workflow without adding services or product behavior.
+**Architecture:** Keep the existing Desktop-only product and validation layers unchanged. Add one standard-library Python scanner that traverses ref/HEAD-reachable text blobs and message objects, neutralizes Git history overlays, rejects incomplete traversal state, and shares credential-pattern definitions with the current-tree scanner; add regression tests for security and build configuration; commit Cargo's lockfile; pin the validated Rust toolchain; and extend the existing GitHub Actions workflow without adding services or product behavior.
 
 **Tech Stack:** Python 3.12 and pytest, Git plumbing commands, Rust/Cargo 1.98.0 with rustfmt, pnpm 10, Tauri 2, GitHub Actions, GitHub pull-request and branch-rule APIs.
 

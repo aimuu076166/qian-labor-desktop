@@ -551,13 +551,12 @@ def test_direct_cargo_parser_keeps_newline_separated_unlocked_check() -> None:
 def test_readme_documents_scoped_locked_dependency_verification() -> None:
     readme = README.read_text(encoding="utf-8")
 
-    assert "Rust 1.98.0 是当前已验证的候选固定工具链，仍待新的三平台 CI 结果确认。" in readme
+    assert "Rust 1.98.0 已由 Linux、macOS ARM64 和 Windows x64 CI 验证为当前固定工具链。" in readme
     assert "`Cargo.lock` 已提交；所有 Cargo 验证中的依赖解析均使用 `--locked`，以固定 Cargo 的依赖解析。" in readme
     assert "不表示完整构建或安装包达到逐位可复现，也不表示已经完成签名生产发布。" in readme
     assert "完整抓取的本地 Git 历史" in readme
-    assert "当前所有本地 ref 可达的提交消息、文件对象，以及从这些 ref 可达的附注标签消息" in readme
-    assert "未抓取到本地的远端历史不在扫描范围内" in readme
-
+    assert "本地 HEAD 或任一本地 ref 可达的文本 blob 与提交消息，以及从本地 ref 可达的附注标签消息" in readme
+    assert "二进制 blob、未被 ref/HEAD 引用的悬空对象和未抓取到本地的远端历史不在内容匹配范围内" in readme
     for command in (
         "python -m compileall -q python/src python/tests scripts",
         "python scripts/scan_public_history.py --repo .",
