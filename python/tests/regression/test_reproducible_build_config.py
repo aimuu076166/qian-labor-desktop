@@ -90,11 +90,14 @@ def _workflow_jobs(workflow: str | None = None) -> dict[str, WorkflowJob]:
         block_target = None
         block_lines = []
 
-    for line in [*lines[jobs_start + 1 :], ""]:
+    for line in lines[jobs_start + 1 :]:
         indentation = len(line) - len(line.lstrip(" "))
         if block_target is not None:
             _, _, block_indentation = block_target
-            if line.strip() and indentation > block_indentation:
+            if not line.strip():
+                block_lines.append("")
+                continue
+            if indentation > block_indentation:
                 block_lines.append(line)
                 continue
             finish_block()
@@ -153,6 +156,8 @@ def _workflow_jobs(workflow: str | None = None) -> dict[str, WorkflowJob]:
             key, value = _key_value(content)
             target = step.with_values if nested == "with" else step.env
             target[key] = value
+    if block_target is not None:
+        finish_block()
     return jobs
 
 
@@ -168,13 +173,50 @@ def _exact_uses(steps: list[WorkflowStep], action: str) -> tuple[int, WorkflowSt
     return matching[0]
 
 
+def _shell_command_segments(command: str) -> list[str]:
+    segments: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if escaped:
+            current.append(character)
+            escaped = False
+        elif character == "\\" and quote != "'":
+            current.append(character)
+            escaped = True
+        elif character in {"'", '"'}:
+            current.append(character)
+            quote = None if quote == character else character if quote is None else quote
+        elif quote is None and character in {"\n", ";"}:
+            if "".join(current).strip():
+                segments.append("".join(current))
+            current = []
+        elif quote is None and character in {"&", "|"} and index + 1 < len(command) and command[index + 1] == character:
+            if "".join(current).strip():
+                segments.append("".join(current))
+            current = []
+            index += 1
+        elif quote is None and character == "|":
+            if "".join(current).strip():
+                segments.append("".join(current))
+            current = []
+        else:
+            current.append(character)
+        index += 1
+    if "".join(current).strip():
+        segments.append("".join(current))
+    return segments
+
+
 def _direct_cargo_invocations(command: str | None) -> list[tuple[str, list[str]]]:
     if command is None:
         return []
-    tokens = shlex.split(command)
     invocations: list[tuple[str, list[str]]] = []
-    for segment in re.split(r"(?:&&|\|\||;|\|)", " ".join(tokens)):
-        words = shlex.split(segment)
+    for segment in _shell_command_segments(command):
+        words = shlex.split(segment, comments=True)
         if len(words) >= 2 and words[0] == "cargo":
             invocations.append((words[1], words[2:]))
     return invocations
@@ -475,6 +517,35 @@ def test_workflow_parser_rejects_secret_hidden_in_block_job_condition() -> None:
     )
 
     assert not _has_no_env_or_secret_context(jobs["public-history-security"])
+
+
+def test_workflow_parser_retains_blank_lines_inside_block_run_secret_context() -> None:
+    jobs = _workflow_jobs(
+        """jobs:
+  public-history-security:
+    steps:
+      - run: |
+          echo safe
+
+          ${{ secrets["HIDDEN_AFTER_BLANK"] }}
+"""
+    )
+
+    job = jobs["public-history-security"]
+    assert job.steps[0].run == 'echo safe\n\n${{ secrets["HIDDEN_AFTER_BLANK"] }}'
+    assert not _has_no_env_or_secret_context(job)
+
+
+def test_direct_cargo_parser_keeps_newline_before_echo_locked_separate() -> None:
+    invocations = _direct_cargo_invocations("cargo test\necho --locked")
+
+    assert invocations == [("test", [])]
+
+
+def test_direct_cargo_parser_keeps_newline_separated_unlocked_check() -> None:
+    invocations = _direct_cargo_invocations("cargo test --locked\ncargo check")
+
+    assert invocations == [("test", ["--locked"]), ("check", [])]
 
 
 def test_readme_documents_scoped_locked_dependency_verification() -> None:
