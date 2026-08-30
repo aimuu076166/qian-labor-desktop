@@ -32,3 +32,12 @@ def test_zhipu_key_placeholders_are_not_reported_as_secrets() -> None:
     for prefix in (b"", b"export "):
         for value in (b"<your-zhipu-api-key>", b"YOUR_API_KEY", b"${AI_API_KEY}"):
             assert pattern.search(prefix + b"AI_API_KEY=" + value) is None
+
+
+def test_lowercase_python_setting_is_not_treated_as_an_env_assignment() -> None:
+    scan = _load_scan_module()
+    pattern = scan.PATTERNS["ZHIPU_KEY_ASSIGNMENT"]
+
+    source = b'    ai_api_key="synthetic-zhipu-key-never-real",'
+
+    assert pattern.search(source) is None

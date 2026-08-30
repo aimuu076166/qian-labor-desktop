@@ -14,7 +14,7 @@ PATTERNS = {
     "GOOGLE_API_KEY": re.compile(rb"\bAIza[0-9A-Za-z_-]{30,}\b"),
     "AWS_ACCESS_KEY_ID": re.compile(rb"\bAKIA[0-9A-Z]{16}\b"),
     "ZHIPU_KEY_ASSIGNMENT": re.compile(
-        rb"(?im)^\s*(?:export\s+)?(?:AI_API_KEY|ZAI_API_KEY|ZHIPU_API_KEY|BIGMODEL_API_KEY)\s*=\s*(?!<|\$\{|YOUR_|replace|example)([^\s#]{16,})"
+        rb"(?m)^\s*(?:export\s+)?(?:AI_API_KEY|ZAI_API_KEY|ZHIPU_API_KEY|BIGMODEL_API_KEY)\s*=\s*(?!<|\$\{|YOUR_|replace|example)([^\s#]{16,})"
     ),
 }
 
