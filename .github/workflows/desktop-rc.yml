@@ -1,0 +1,297 @@
+name: desktop-rc
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-rc-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-arm64-rc:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.head_ref, 'release/')
+    runs-on: macos-15
+    env:
+      RC_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt
+      - name: Verify Apple Silicon runner
+        run: >-
+          python -c "import subprocess; value=subprocess.check_output(['rustc','--print','host-tuple'], text=True).strip(); assert value == 'aarch64-apple-darwin', value; print('MACOS_ARM64_RUNNER=PASS')"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e './python[test,build]'
+      - run: pnpm install --frozen-lockfile
+      - name: Run RC verifier contracts
+        run: >-
+          python -m pytest -q
+          python/tests/regression/test_built_sidecar_verifier.py
+          python/tests/regression/test_rc_bundle_verifier.py
+          python/tests/regression/test_rc_packaging_workflow.py
+          python/tests/regression/test_reproducible_build_config.py
+      - run: python scripts/verify_desktop.py
+      - run: python scripts/build_sidecar.py
+      - run: >-
+          python scripts/verify_built_sidecar.py
+          --binary apps/desktop/src-tauri/binaries/qian-sidecar-aarch64-apple-darwin
+      - run: pnpm --dir apps/desktop test -- --run
+      - run: pnpm --dir apps/desktop lint
+      - run: pnpm --dir apps/desktop typecheck
+      - run: pnpm --dir apps/desktop build
+      - run: cd apps/desktop/src-tauri && cargo test --locked
+      - run: cd apps/desktop/src-tauri && cargo check --locked
+      - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all --check
+      - name: Build unsigned macOS application and DMG
+        run: pnpm --dir apps/desktop tauri build --bundles app,dmg --no-sign --ci -- --locked
+      - run: git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock
+      - name: Locate exact macOS outputs
+        run: |
+          shopt -s nullglob
+          apps=(apps/desktop/src-tauri/target/release/bundle/macos/*.app)
+          dmgs=(apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg)
+          test "${#apps[@]}" -eq 1
+          test "${#dmgs[@]}" -eq 1
+          echo "QIAN_APP_BUNDLE=${apps[0]}" >> "$GITHUB_ENV"
+          echo "QIAN_DMG=${dmgs[0]}" >> "$GITHUB_ENV"
+      - name: Mount the generated DMG read-only
+        run: |
+          mkdir -p "$RUNNER_TEMP/qian-rc-dmg"
+          hdiutil attach "$QIAN_DMG" -mountpoint "$RUNNER_TEMP/qian-rc-dmg" -nobrowse -readonly
+          shopt -s nullglob
+          apps=("$RUNNER_TEMP"/qian-rc-dmg/*.app)
+          test "${#apps[@]}" -eq 1
+          echo "QIAN_MOUNTED_APP=${apps[0]}" >> "$GITHUB_ENV"
+      - name: Verify original and DMG application payloads
+        run: >-
+          python scripts/verify_rc_bundle.py
+          --platform macos
+          --payload "$QIAN_APP_BUNDLE"
+          --payload "$QIAN_MOUNTED_APP"
+          --source-config apps/desktop/src-tauri/tauri.conf.json
+          --expected-commit "$RC_COMMIT"
+      - name: Smoke-test the application from the mounted DMG
+        run: |
+          executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$QIAN_MOUNTED_APP/Contents/Info.plist")"
+          python scripts/smoke_packaged_app.py --app-binary "$QIAN_MOUNTED_APP/Contents/MacOS/$executable_name"
+      - name: Detach the generated DMG
+        if: always()
+        run: hdiutil detach "$RUNNER_TEMP/qian-rc-dmg" || true
+      - name: Stage macOS RC artifacts
+        run: >-
+          python scripts/stage_rc_artifacts.py macos
+          --app "$QIAN_APP_BUNDLE"
+          --dmg "$QIAN_DMG"
+          --output-dir rc-stage
+      - name: Create macOS build manifest and checksums
+        run: >-
+          python scripts/rc_manifest.py create-platform
+          --platform macos
+          --architecture arm64
+          --artifact rc-stage/qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.app.tar.gz
+          --artifact rc-stage/qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.dmg
+          --built-sidecar-smoke PASS
+          --packaged-app-smoke PASS
+          --output rc-stage/PLATFORM-MANIFEST.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned
+          path: rc-stage
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-x64-rc:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.head_ref, 'release/')
+    runs-on: windows-latest
+    env:
+      RC_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt
+      - name: Verify Windows x64 runner
+        run: >-
+          python -c "import subprocess; value=subprocess.check_output(['rustc','--print','host-tuple'], text=True).strip(); assert value == 'x86_64-pc-windows-msvc', value; print('WINDOWS_X64_RUNNER=PASS')"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e './python[test,build]'
+      - run: pnpm install --frozen-lockfile
+      - name: Run RC verifier contracts
+        run: >-
+          python -m pytest -q
+          python/tests/regression/test_built_sidecar_verifier.py
+          python/tests/regression/test_rc_bundle_verifier.py
+          python/tests/regression/test_rc_packaging_workflow.py
+          python/tests/regression/test_reproducible_build_config.py
+      - run: python scripts/verify_desktop.py
+      - run: python scripts/build_sidecar.py
+      - run: >-
+          python scripts/verify_built_sidecar.py
+          --binary apps/desktop/src-tauri/binaries/qian-sidecar-x86_64-pc-windows-msvc.exe
+      - run: pnpm --dir apps/desktop test -- --run
+      - run: pnpm --dir apps/desktop lint
+      - run: pnpm --dir apps/desktop typecheck
+      - run: pnpm --dir apps/desktop build
+      - run: cd apps/desktop/src-tauri && cargo test --locked
+      - run: cd apps/desktop/src-tauri && cargo check --locked
+      - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all --check
+      - name: Build unsigned Windows NSIS installer
+        run: pnpm --dir apps/desktop tauri build --bundles nsis --no-sign --ci -- --locked
+      - run: git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock
+      - name: Locate exact NSIS output
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -LiteralPath "apps/desktop/src-tauri/target/release/bundle/nsis" -Filter "*.exe" -File)
+          if ($installers.Count -ne 1) { throw "NSIS_OUTPUT_COUNT_INVALID" }
+          "QIAN_NSIS=$($installers[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Silently install the generated NSIS candidate
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP "qian-rc-install"
+          if (Test-Path -LiteralPath $installRoot) { throw "INSTALL_ROOT_ALREADY_EXISTS" }
+          $process = Start-Process -FilePath $env:QIAN_NSIS -ArgumentList @("/S", "/D=$installRoot") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "NSIS_INSTALL_FAILED" }
+          if (-not (Test-Path -LiteralPath $installRoot -PathType Container)) { throw "NSIS_INSTALL_ROOT_MISSING" }
+          "QIAN_INSTALL_ROOT=$installRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Locate installed application executable
+        shell: pwsh
+        run: |
+          $candidates = @(Get-ChildItem -LiteralPath $env:QIAN_INSTALL_ROOT -Recurse -File | Where-Object { $_.Name -in @("qian-labor-desktop.exe", "企安用工.exe") })
+          if ($candidates.Count -ne 1) { throw "INSTALLED_APP_COUNT_INVALID" }
+          "QIAN_INSTALLED_APP=$($candidates[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Verify installed Windows payload
+        run: >-
+          python scripts/verify_rc_bundle.py
+          --platform windows
+          --payload "$env:QIAN_INSTALL_ROOT"
+          --source-config apps/desktop/src-tauri/tauri.conf.json
+          --expected-commit "$env:RC_COMMIT"
+      - name: Smoke-test the installed Windows application
+        run: python scripts/smoke_packaged_app.py --app-binary "$env:QIAN_INSTALLED_APP"
+      - name: Uninstall the temporary Windows candidate
+        if: always()
+        shell: pwsh
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP "qian-rc-install"
+          if (Test-Path -LiteralPath $installRoot) {
+            $fullRoot = [IO.Path]::GetFullPath($installRoot)
+            $fullTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+            if (-not $fullRoot.StartsWith($fullTemp, [StringComparison]::OrdinalIgnoreCase)) { throw "INSTALL_ROOT_OUTSIDE_RUNNER_TEMP" }
+            $uninstallers = @(Get-ChildItem -LiteralPath $fullRoot -Recurse -Filter "uninstall*.exe" -File)
+            if ($uninstallers.Count -eq 1) {
+              Start-Process -FilePath $uninstallers[0].FullName -ArgumentList @("/S") -Wait
+            }
+            if (Test-Path -LiteralPath $fullRoot) { Remove-Item -LiteralPath $fullRoot -Recurse -Force }
+          }
+      - name: Stage Windows RC artifact
+        run: >-
+          python scripts/stage_rc_artifacts.py windows
+          --installer "$env:QIAN_NSIS"
+          --output-dir rc-stage
+      - name: Create Windows build manifest and checksum
+        run: >-
+          python scripts/rc_manifest.py create-platform
+          --platform windows
+          --architecture x64
+          --artifact rc-stage/qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe
+          --built-sidecar-smoke PASS
+          --packaged-app-smoke PASS
+          --output rc-stage/PLATFORM-MANIFEST.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned
+          path: rc-stage
+          if-no-files-found: error
+          retention-days: 14
+
+  rc-manifest:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.head_ref, 'release/')
+    needs:
+      - macos-arm64-rc
+      - windows-x64-rc
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned
+          path: downloads/macos
+      - uses: actions/download-artifact@v4
+        with:
+          name: qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned
+          path: downloads/windows
+      - name: Combine and independently rehash platform artifacts
+        run: >-
+          python scripts/rc_manifest.py combine
+          --manifest downloads/macos/PLATFORM-MANIFEST.json
+          --manifest downloads/windows/PLATFORM-MANIFEST.json
+          --artifact-root downloads
+          --output-dir rc-final
+      - name: Verify final RC manifest and checksum file
+        run: >-
+          python scripts/rc_manifest.py verify
+          --manifest rc-final/BUILD-MANIFEST.json
+          --artifact-root rc-final
+      - name: Verify exact final deliverables
+        run: |
+          test -f rc-final/qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.app.tar.gz
+          test -f rc-final/qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.dmg
+          test -f rc-final/qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe
+          test -f rc-final/BUILD-MANIFEST.json
+          test -f rc-final/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qian-labor-desktop-0.1.0-rc.1-unsigned
+          path: rc-final
+          if-no-files-found: error
+          retention-days: 14

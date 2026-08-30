@@ -189,6 +189,8 @@ def test_manifest_verification_rejects_checksum_mismatch_without_leaking_content
         {"repository": "owner/repo", "run_id": "123", "run_attempt": "1"},
         "2026-08-31T00:00:00Z",
     )
+    assert (tmp_path / "SHA256SUMS-macos.txt").is_file()
+    assert (tmp_path / "SHA256SUMS-windows.txt").is_file()
     artifact.write_bytes(b"private changed content")
 
     with pytest.raises(manifest.ManifestError) as captured:

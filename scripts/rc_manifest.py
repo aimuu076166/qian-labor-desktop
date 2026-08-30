@@ -148,6 +148,7 @@ def create_platform_manifest(
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _write_checksums(entries, output.with_name(f"SHA256SUMS-{platform}.txt"))
     return payload
 
 
