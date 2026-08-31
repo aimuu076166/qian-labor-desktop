@@ -30,6 +30,7 @@ REQUIRED_ARTIFACT_FIELDS = {
     "built_sidecar_smoke",
     "packaged_app_smoke",
     "packaged_app_smoke_reason",
+    "abnormal_lifecycle_smoke",
     "built_at",
 }
 
@@ -63,6 +64,7 @@ def _artifact_entry(
     built_sidecar_smoke: str,
     packaged_app_smoke: str,
     packaged_app_smoke_reason: str | None,
+    abnormal_lifecycle_smoke: str,
     built_at: str,
 ) -> dict[str, object]:
     if not path.is_file() or path.is_symlink():
@@ -80,6 +82,7 @@ def _artifact_entry(
         "built_sidecar_smoke": built_sidecar_smoke,
         "packaged_app_smoke": packaged_app_smoke,
         "packaged_app_smoke_reason": packaged_app_smoke_reason,
+        "abnormal_lifecycle_smoke": abnormal_lifecycle_smoke,
         "built_at": built_at,
     }
 
@@ -107,6 +110,7 @@ def create_platform_manifest(
     workflow: dict[str, str],
     built_at: str,
     packaged_app_smoke_reason: str | None = None,
+    abnormal_lifecycle_smoke: str = "PASS",
 ) -> dict[str, object]:
     if not re.fullmatch(r"[0-9a-f]{40}", git_commit):
         raise ManifestError("COMMIT_INVALID")
@@ -121,6 +125,8 @@ def create_platform_manifest(
         or not re.fullmatch(r"[A-Z0-9_:-]{3,160}", packaged_app_smoke_reason)
     ):
         raise ManifestError("PACKAGED_APP_SMOKE_REASON_REQUIRED")
+    if abnormal_lifecycle_smoke != "PASS":
+        raise ManifestError("ABNORMAL_LIFECYCLE_SMOKE_INVALID")
     if set(toolchain) != {"node", "pnpm", "python", "rustc"} or not all(toolchain.values()):
         raise ManifestError("TOOLCHAIN_INVALID")
     if set(workflow) != {"repository", "run_id", "run_attempt"} or not all(workflow.values()):
@@ -137,6 +143,7 @@ def create_platform_manifest(
             built_sidecar_smoke,
             packaged_app_smoke,
             packaged_app_smoke_reason,
+            abnormal_lifecycle_smoke,
             built_at,
         )
         for path in sorted(artifacts, key=lambda value: value.name)
@@ -156,6 +163,7 @@ def create_platform_manifest(
         "built_sidecar_smoke": built_sidecar_smoke,
         "packaged_app_smoke": packaged_app_smoke,
         "packaged_app_smoke_reason": packaged_app_smoke_reason,
+        "abnormal_lifecycle_smoke": abnormal_lifecycle_smoke,
         "toolchain": toolchain,
         "workflow": workflow,
         "built_at": built_at,
@@ -184,6 +192,7 @@ def _read_manifest(path: Path) -> dict[str, object]:
         "notarized",
         "real_provider_smoke",
         "image_input",
+        "abnormal_lifecycle_smoke",
         "artifacts",
     }
     if not required.issubset(payload):
@@ -198,7 +207,9 @@ def _read_manifest(path: Path) -> dict[str, object]:
         raise ManifestError("MANIFEST_VALUE_INVALID")
     if payload["notarized"] is not False or payload["real_provider_smoke"] != "NOT_RUN":
         raise ManifestError("MANIFEST_VALUE_INVALID")
-    if payload["image_input"] != "NOT_RUN" or not re.fullmatch(
+    if payload["image_input"] != "NOT_RUN" or payload["abnormal_lifecycle_smoke"] != "PASS":
+        raise ManifestError("MANIFEST_VALUE_INVALID")
+    if not re.fullmatch(
         r"[0-9a-f]{40}", str(payload["git_commit"])
     ):
         raise ManifestError("MANIFEST_VALUE_INVALID")
@@ -237,6 +248,8 @@ def _validate_entry(entry: object, root: Path) -> tuple[dict[str, object], Path]
         not isinstance(reason, str) or not re.fullmatch(r"[A-Z0-9_:-]{3,160}", reason)
     ):
         raise ManifestError("PACKAGED_APP_SMOKE_REASON_REQUIRED")
+    if entry["abnormal_lifecycle_smoke"] != "PASS":
+        raise ManifestError("ABNORMAL_LIFECYCLE_SMOKE_INVALID")
     return entry, path
 
 
@@ -280,6 +293,7 @@ def combine_manifests(
         "notarized": False,
         "real_provider_smoke": "NOT_RUN",
         "image_input": "NOT_RUN",
+        "abnormal_lifecycle_smoke": "PASS",
         "artifacts": [entry for entry, _ in entries_and_paths],
         "platform_evidence": [
             {
@@ -287,6 +301,7 @@ def combine_manifests(
                 "architecture": payload.get("architecture"),
                 "packaged_app_smoke": payload.get("packaged_app_smoke"),
                 "packaged_app_smoke_reason": payload.get("packaged_app_smoke_reason"),
+                "abnormal_lifecycle_smoke": payload.get("abnormal_lifecycle_smoke"),
                 "toolchain": payload.get("toolchain"),
                 "workflow": payload.get("workflow"),
             }
@@ -374,6 +389,7 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--built-sidecar-smoke", choices=("PASS",), required=True)
     create.add_argument("--packaged-app-smoke", choices=("PASS", "NOT_RUN"), required=True)
     create.add_argument("--packaged-app-smoke-reason")
+    create.add_argument("--abnormal-lifecycle-smoke", choices=("PASS",), required=True)
     combine = commands.add_parser("combine")
     combine.add_argument("--manifest", type=Path, action="append", required=True)
     combine.add_argument("--artifact-root", type=Path, required=True)
@@ -401,6 +417,7 @@ def main() -> int:
                 workflow,
                 built_at,
                 args.packaged_app_smoke_reason,
+                args.abnormal_lifecycle_smoke,
             )
         elif args.command == "combine":
             combine_manifests(args.manifest, args.artifact_root, args.output_dir)

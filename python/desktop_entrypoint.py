@@ -81,7 +81,12 @@ def main() -> int:
     listener = _bind_loopback(_configured_port())
     port = int(listener.getsockname()[1])
 
-    app = create_desktop_app(data_dir=data_dir, launch_token=token)
+    shutdown_requested = threading.Event()
+    app = create_desktop_app(
+        data_dir=data_dir,
+        launch_token=token,
+        shutdown_callback=shutdown_requested.set,
+    )
     config = uvicorn.Config(
         app,
         host=HOST,
@@ -127,7 +132,9 @@ def main() -> int:
 
     try:
         while thread.is_alive():
-            thread.join(timeout=0.5)
+            if shutdown_requested.wait(timeout=0.05):
+                server.should_exit = True
+            thread.join(timeout=0.05)
     except KeyboardInterrupt:
         server.should_exit = True
         thread.join(timeout=5)

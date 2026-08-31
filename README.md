@@ -139,9 +139,11 @@ cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
 1. `scripts/verify_desktop.py` 验证源码入口；
 2. `scripts/verify_built_sidecar.py` 验证 PyInstaller 真实二进制、环回绑定、token 鉴权、SQLite、synthetic Fake Provider 全链、R01—R20、来源追溯、删除及退出残留；
 3. `scripts/verify_rc_bundle.py` 检查应用载荷的版本、标识符、CPU 架构、sidecar 数量、禁止文件、敏感内容和构建机路径；
-4. `scripts/smoke_packaged_app.py` 启动 DMG 中或 NSIS 安装后的主程序，要求它启动随包 sidecar、在隔离的临时目录建立 SQLite，并在主程序退出后确认 sidecar PID 不再存活。
+4. `scripts/smoke_packaged_app.py` 启动 DMG 中或 NSIS 安装后的主程序，要求它启动随包 sidecar、在隔离的临时目录建立 SQLite，在主程序退出前完成受鉴权关闭和 owned-process 清理，并独立确认诊断 PID 不再存活；`--abnormal-lifecycle` 还会强制终止测试主程序，验证异常退出时进程树仍被清理。
 
 打包应用 smoke 仅在显式设置 `QIAN_RC_SMOKE=1` 时生效，并且 `QIAN_RC_SMOKE_DIR` 必须是操作系统临时目录下已存在、名称以 `qian-rc-smoke-` 开头的真实目录；符号链接和越界路径会被拒绝。该模式不暴露 IPC token，不改变普通用户启动路径，也不会把临时数据库写入安装包。
+
+正常退出时，桌面主程序先调用只绑定 loopback、受随机启动 token 保护的内部 shutdown API，让 FastAPI lifespan 关闭队列和数据库；超时或请求失败后才使用启动时建立的进程树所有权对象。Unix/macOS 使用 exec 前建立且由看门狗锚进程持续证明的专用进程组，Windows 使用 suspended creation 后先纳入 kill-on-close Job Object 再恢复进程。READY payload 中的 PID 只用于诊断和 smoke 证据，不是终止权限。
 
 macOS ARM64 本地候选构建示例：
 
@@ -183,7 +185,7 @@ Windows PowerShell 可对每个文件运行 `Get-FileHash -Algorithm SHA256 <文
 
 当前默认 Provider 仍是 Fake。完成 synthetic 验收并退出应用后，如需清除本地测试数据，应先确认主程序和 sidecar 已退出，再删除当前用户下的应用数据目录：macOS 为 `~/Library/Application Support/cn.qianlabor.desktop`，Windows 为 `$env:APPDATA\cn.qianlabor.desktop`。卸载 Windows 应先使用安装程序生成的卸载器，再检查该测试数据目录；清理前应确认目录标识符完全一致，避免删除其他应用数据。
 
-只有两个平台的 built-sidecar smoke 与 packaged-app smoke 都真实通过，且最终下载产物经独立重算 SHA-256 后一致，RC Pull Request 才能从 Draft 转为 Ready。若 hosted runner 无法可靠执行 GUI/安装后启动验收，对应项必须记录 `NOT_RUN` 并保持 Draft，不能用源码测试、bundle 检查或推测替代 `PASS`。详细字段见 `docs/release/v0.1.0-rc.1-checklist.md`。
+只有两个平台的 built-sidecar smoke、正常 packaged-app smoke 与异常生命周期清理 smoke 都真实通过，且最终下载产物经独立重算 SHA-256 后一致，RC Pull Request 才能从 Draft 转为 Ready。动态 commit、run ID、大小和 SHA-256 以 PR 的 exact-head 证据、`BUILD-MANIFEST.json` 与 `SHA256SUMS.txt` 为准，不回填到源码模板形成 provenance 循环。若 hosted runner 无法可靠执行 GUI/安装后启动验收，对应项必须记录 `NOT_RUN` 并保持 Draft，不能用源码测试、bundle 检查或推测替代 `PASS`。详细规则见 `docs/release/v0.1.0-rc.1-checklist.md`。
 
 ## Real Provider smoke
 

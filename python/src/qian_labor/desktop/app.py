@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -138,6 +138,7 @@ def create_desktop_app(
     data_dir: Path,
     launch_token: str,
     settings: Settings | None = None,
+    shutdown_callback: Callable[[], None] | None = None,
 ) -> FastAPI:
     if not launch_token:
         raise ValueError("DESKTOP_TOKEN_REQUIRED")
@@ -208,6 +209,16 @@ def create_desktop_app(
     @app.get("/api/status", response_model=DesktopStatusResponse)
     def status() -> DesktopStatusResponse:
         return DesktopStatusResponse(status="ready", database_path=str(database.path))
+
+    @app.post("/api/internal/shutdown", status_code=http_status.HTTP_202_ACCEPTED)
+    def request_shutdown() -> dict[str, str]:
+        if shutdown_callback is None:
+            raise HTTPException(
+                http_status.HTTP_503_SERVICE_UNAVAILABLE,
+                {"code": "DESKTOP_SHUTDOWN_UNAVAILABLE"},
+            )
+        shutdown_callback()
+        return {"status": "shutdown_requested"}
 
     @app.post("/api/analyses", status_code=http_status.HTTP_201_CREATED)
     def create_analysis(body: CreateAnalysisRequest) -> dict[str, object]:

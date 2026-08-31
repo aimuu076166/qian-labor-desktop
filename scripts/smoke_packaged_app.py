@@ -51,15 +51,30 @@ def process_is_alive(pid: int) -> bool:
 
 
 def validate_smoke_result(root: Path, payload: object) -> int:
-    if not isinstance(payload, dict) or set(payload) != {"database_created", "sidecar_pid"}:
+    if not isinstance(payload, dict) or set(payload) != {
+        "cleanup_complete",
+        "database_created",
+        "sidecar_pid",
+    }:
         raise PackagedSmokeError("RESULT_SCHEMA_INVALID")
     if payload["database_created"] is not True:
         raise PackagedSmokeError("DATABASE_NOT_CREATED")
+    if payload["cleanup_complete"] is not True:
+        raise PackagedSmokeError("SIDECAR_CLEANUP_INCOMPLETE")
     pid = payload["sidecar_pid"]
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         raise PackagedSmokeError("SIDECAR_PID_INVALID")
     if not (root / "app-data" / "qian-labor.db").is_file():
         raise PackagedSmokeError("DATABASE_MISSING")
+    return pid
+
+
+def validate_smoke_started(payload: object) -> int:
+    if not isinstance(payload, dict) or set(payload) != {"sidecar_pid"}:
+        raise PackagedSmokeError("STARTED_SCHEMA_INVALID")
+    pid = payload["sidecar_pid"]
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise PackagedSmokeError("SIDECAR_PID_INVALID")
     return pid
 
 
@@ -183,20 +198,76 @@ def smoke_packaged_app(binary: Path) -> None:
                 _terminate_process_tree(process)
 
 
+def smoke_abnormal_lifecycle(binary: Path) -> None:
+    executable = _validate_binary(binary)
+    process: subprocess.Popen[bytes] | None = None
+    with tempfile.TemporaryDirectory(prefix="qian-rc-smoke-") as temporary:
+        root = Path(temporary).resolve()
+        env = {
+            **os.environ,
+            "AI_PROVIDER": "fake",
+            "AI_API_KEY": "",
+            "QIAN_RC_SMOKE": "1",
+            "QIAN_RC_SMOKE_DIR": str(root),
+        }
+        try:
+            process = subprocess.Popen(
+                [str(executable)],
+                cwd=executable.parent,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **_popen_options(),
+            )
+            started_path = root / "started.json"
+            deadline = time.monotonic() + 30
+            while not started_path.is_file() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if not started_path.is_file():
+                raise PackagedSmokeError("ABNORMAL_STARTED_MISSING")
+            try:
+                started = json.loads(started_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as error:
+                raise PackagedSmokeError("ABNORMAL_STARTED_INVALID") from error
+            sidecar_pid = validate_smoke_started(started)
+
+            if os.name == "nt":
+                process.kill()
+            else:
+                os.kill(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+
+            deadline = time.monotonic() + 15
+            while process_is_alive(sidecar_pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if process_is_alive(sidecar_pid):
+                raise PackagedSmokeError("ABNORMAL_SIDECAR_RESIDUE")
+        except (OSError, subprocess.SubprocessError) as error:
+            raise PackagedSmokeError("ABNORMAL_APP_LAUNCH_FAILED") from error
+        finally:
+            if process is not None:
+                _terminate_process_tree(process)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Smoke-test one packaged desktop executable.")
     parser.add_argument("--app-binary", type=Path, required=True)
+    parser.add_argument("--abnormal-lifecycle", action="store_true")
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
     try:
-        smoke_packaged_app(args.app_binary)
+        if args.abnormal_lifecycle:
+            smoke_abnormal_lifecycle(args.app_binary)
+        else:
+            smoke_packaged_app(args.app_binary)
     except PackagedSmokeError as error:
         print(f"PACKAGED_APP_SMOKE=FAIL:{error.code}", file=sys.stderr)
         return 1
-    print("PACKAGED_APP_SMOKE=PASS")
+    marker = "ABNORMAL_LIFECYCLE_SMOKE" if args.abnormal_lifecycle else "PACKAGED_APP_SMOKE"
+    print(f"{marker}=PASS")
     return 0
 
 

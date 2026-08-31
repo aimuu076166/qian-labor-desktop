@@ -1,6 +1,7 @@
 use std::ffi::OsStr;
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -8,6 +9,8 @@ use anyhow::{anyhow, Context, Result};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
+
+use crate::process_ownership::OwnedSidecarProcess;
 
 const READY_FILE_PREFIX: &str = ".qian-sidecar-ready-";
 const LOOPBACK_HOST: &str = "127.0.0.1";
@@ -31,9 +34,10 @@ pub struct DesktopBackendInfo {
 
 pub struct BackendProcess {
     info: DesktopBackendInfo,
-    child: Child,
+    owned_process: OwnedSidecarProcess,
     data_dir: PathBuf,
     sidecar_pid: u32,
+    sidecar_port: u16,
     smoke_root: Option<PathBuf>,
 }
 
@@ -54,13 +58,24 @@ impl BackendProcess {
     }
 }
 
-#[derive(Default)]
-pub struct BackendState {
-    process: Mutex<Option<BackendProcess>>,
+pub(crate) trait StoppableBackend {
+    fn stop_backend(&mut self) -> Result<(), String>;
 }
 
-impl BackendState {
-    pub fn install(&self, process: BackendProcess) -> Result<(), String> {
+pub struct BackendState<P = BackendProcess> {
+    process: Mutex<Option<P>>,
+}
+
+impl<P> Default for BackendState<P> {
+    fn default() -> Self {
+        Self {
+            process: Mutex::new(None),
+        }
+    }
+}
+
+impl<P: StoppableBackend> BackendState<P> {
+    pub fn install(&self, process: P) -> Result<(), String> {
         let mut slot = self
             .process
             .lock()
@@ -72,6 +87,20 @@ impl BackendState {
         Ok(())
     }
 
+    pub fn stop(&self) -> Result<(), String> {
+        let process = self
+            .process
+            .lock()
+            .map_err(|_| "DESKTOP_BACKEND_STATE_POISONED".to_string())?
+            .take();
+        if let Some(mut process) = process {
+            process.stop_backend()?;
+        }
+        Ok(())
+    }
+}
+
+impl BackendState<BackendProcess> {
     fn info(&self) -> Result<DesktopBackendInfo, String> {
         let slot = self
             .process
@@ -81,68 +110,104 @@ impl BackendState {
             .map(|process| process.info.clone())
             .ok_or_else(|| "DESKTOP_BACKEND_NOT_READY".to_string())
     }
+}
 
-    pub fn stop(&self) -> Result<(), String> {
-        let process = self
-            .process
-            .lock()
-            .map_err(|_| "DESKTOP_BACKEND_STATE_POISONED".to_string())?
-            .take();
-        if let Some(mut process) = process {
-            terminate_ready_process(process.sidecar_pid)?;
-            stop_child(&mut process.child)?;
-        }
-        Ok(())
+trait OwnedProcessControl {
+    fn sidecar_exited(&mut self) -> Result<bool, String>;
+    fn wait_for_sidecar_exit(&mut self, timeout: Duration) -> Result<bool, String>;
+    fn finalize_after_graceful(&mut self) -> Result<(), String>;
+    fn force_cleanup(&mut self) -> Result<(), String>;
+}
+
+impl OwnedProcessControl for OwnedSidecarProcess {
+    fn sidecar_exited(&mut self) -> Result<bool, String> {
+        self.sidecar_exited()
+    }
+
+    fn wait_for_sidecar_exit(&mut self, timeout: Duration) -> Result<bool, String> {
+        self.wait_for_sidecar_exit(timeout)
+    }
+
+    fn finalize_after_graceful(&mut self) -> Result<(), String> {
+        self.finalize_after_graceful()
+    }
+
+    fn force_cleanup(&mut self) -> Result<(), String> {
+        self.force_cleanup()
     }
 }
 
-fn stop_child(child: &mut Child) -> Result<(), String> {
-    if child
-        .try_wait()
-        .map_err(|_| "DESKTOP_BACKEND_STOP_FAILED".to_string())?
-        .is_none()
-    {
-        child
-            .kill()
-            .map_err(|_| "DESKTOP_BACKEND_STOP_FAILED".to_string())?;
-        child
-            .wait()
-            .map_err(|_| "DESKTOP_BACKEND_STOP_FAILED".to_string())?;
+fn shutdown_owned_process<P, F>(process: &mut P, graceful_shutdown: F) -> Result<(), String>
+where
+    P: OwnedProcessControl,
+    F: FnOnce() -> Result<(), String>,
+{
+    if matches!(process.sidecar_exited(), Ok(true)) {
+        return process
+            .finalize_after_graceful()
+            .or_else(|_| process.force_cleanup())
+            .map_err(|_| "DESKTOP_BACKEND_STOP_FAILED".to_string());
     }
-    Ok(())
-}
 
-#[cfg(unix)]
-fn terminate_ready_process(pid: u32) -> Result<(), String> {
-    let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-    if result == 0 {
+    let graceful_succeeded = graceful_shutdown().is_ok();
+    let graceful_exit = matches!(
+        process.wait_for_sidecar_exit(Duration::from_secs(5)),
+        Ok(true)
+    );
+    if graceful_succeeded && graceful_exit && process.finalize_after_graceful().is_ok() {
         return Ok(());
     }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err("DESKTOP_BACKEND_STOP_FAILED".to_string())
+
+    process
+        .force_cleanup()
+        .map_err(|_| "DESKTOP_BACKEND_STOP_FAILED".to_string())
+}
+
+fn owned_startup_failure<P: OwnedProcessControl>(process: &mut P, code: &str) -> anyhow::Error {
+    match process.force_cleanup() {
+        Ok(()) => anyhow::Error::msg(code.to_string()),
+        Err(_) => anyhow!("DESKTOP_SIDECAR_STARTUP_CLEANUP_FAILED"),
     }
 }
 
-#[cfg(windows)]
-fn terminate_ready_process(pid: u32) -> Result<(), String> {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
-
-    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
-    if handle.is_null() {
-        return Ok(());
-    }
-    let terminated = unsafe { TerminateProcess(handle, 0) };
-    unsafe {
-        CloseHandle(handle);
-    }
-    if terminated == 0 {
-        Err("DESKTOP_BACKEND_STOP_FAILED".to_string())
-    } else {
+fn request_graceful_shutdown(port: u16, token: &str) -> Result<(), String> {
+    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let mut stream = TcpStream::connect_timeout(&address.into(), Duration::from_secs(2))
+        .map_err(|_| "DESKTOP_GRACEFUL_SHUTDOWN_FAILED".to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| "DESKTOP_GRACEFUL_SHUTDOWN_FAILED".to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .map_err(|_| "DESKTOP_GRACEFUL_SHUTDOWN_FAILED".to_string())?;
+    let request = format!(
+        "POST /api/internal/shutdown HTTP/1.1\r\nHost: {LOOPBACK_HOST}:{port}\r\nX-Qian-Desktop-Token: {token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|_| "DESKTOP_GRACEFUL_SHUTDOWN_FAILED".to_string())?;
+    let mut response = [0_u8; 256];
+    let count = stream
+        .read(&mut response)
+        .map_err(|_| "DESKTOP_GRACEFUL_SHUTDOWN_FAILED".to_string())?;
+    let status_line = std::str::from_utf8(&response[..count])
+        .ok()
+        .and_then(|value| value.lines().next())
+        .unwrap_or_default();
+    if status_line.starts_with("HTTP/1.1 202 ") || status_line.starts_with("HTTP/1.0 202 ") {
         Ok(())
+    } else {
+        Err("DESKTOP_GRACEFUL_SHUTDOWN_FAILED".to_string())
+    }
+}
+
+impl StoppableBackend for BackendProcess {
+    fn stop_backend(&mut self) -> Result<(), String> {
+        let port = self.sidecar_port;
+        let token = self.info.token.clone();
+        shutdown_owned_process(&mut self.owned_process, || {
+            request_graceful_shutdown(port, &token)
+        })
     }
 }
 
@@ -209,17 +274,6 @@ fn bundled_sidecar_path(executable: &Path) -> Result<PathBuf, String> {
     let name = "qian-sidecar";
     Ok(directory.join(name))
 }
-
-#[cfg(windows)]
-fn configure_sidecar_process(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn configure_sidecar_process(_command: &mut Command) {}
 
 fn runtime_smoke_root(requested: &Path, canonical: &Path, windows: bool) -> PathBuf {
     if windows {
@@ -330,19 +384,15 @@ pub async fn start_backend(app: AppHandle) -> Result<BackendProcess> {
             Err(_) => return Err(anyhow!("DESKTOP_READY_FILE_UNAVAILABLE")),
         }
     }
-    let mut command = Command::new(&sidecar);
-    command
-        .current_dir(sidecar_directory)
-        .env("QIAN_DESKTOP_DATA_DIR", data_dir.as_os_str())
-        .env("QIAN_DESKTOP_TOKEN", &token)
-        .env("QIAN_DESKTOP_PORT", "0")
-        .env("QIAN_DESKTOP_READY_FILE", ready_file.as_os_str())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    configure_sidecar_process(&mut command);
-
-    let mut child = command.spawn().context("DESKTOP_SIDECAR_SPAWN_FAILED")?;
+    let mut owned_process = OwnedSidecarProcess::spawn_sidecar(
+        &sidecar,
+        sidecar_directory,
+        &data_dir,
+        &token,
+        &ready_file,
+    )
+    .map_err(anyhow::Error::msg)
+    .context("DESKTOP_SIDECAR_SPAWN_FAILED")?;
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let ready = loop {
@@ -350,47 +400,57 @@ pub async fn start_backend(app: AppHandle) -> Result<BackendProcess> {
             Ok(Some(payload)) => match parse_ready_payload(&payload) {
                 Ok(ready) => {
                     cleanup_ready_files(&ready_file);
-                    let exited = match child.try_wait() {
-                        Ok(status) => status.is_some(),
+                    let exited = match owned_process.sidecar_exited() {
+                        Ok(exited) => exited,
                         Err(_) => {
-                            let _ = stop_child(&mut child);
-                            return Err(anyhow!("DESKTOP_SIDECAR_EVENT_ERROR"));
+                            return Err(owned_startup_failure(
+                                &mut owned_process,
+                                "DESKTOP_SIDECAR_EVENT_ERROR",
+                            ));
                         }
                     };
                     if exited {
-                        return Err(anyhow!("DESKTOP_SIDECAR_TERMINATED_BEFORE_READY"));
+                        return Err(owned_startup_failure(
+                            &mut owned_process,
+                            "DESKTOP_SIDECAR_TERMINATED_BEFORE_READY",
+                        ));
                     }
                     break ready;
                 }
                 Err(error) => {
                     cleanup_ready_files(&ready_file);
-                    let _ = stop_child(&mut child);
-                    return Err(anyhow::Error::msg(error));
+                    return Err(owned_startup_failure(&mut owned_process, &error));
                 }
             },
             Ok(None) => {}
             Err(error) => {
                 cleanup_ready_files(&ready_file);
-                let _ = stop_child(&mut child);
-                return Err(anyhow::Error::msg(error));
+                return Err(owned_startup_failure(&mut owned_process, &error));
             }
         }
 
-        let exited = match child.try_wait() {
-            Ok(status) => status.is_some(),
+        let exited = match owned_process.sidecar_exited() {
+            Ok(exited) => exited,
             Err(_) => {
-                let _ = stop_child(&mut child);
-                return Err(anyhow!("DESKTOP_SIDECAR_EVENT_ERROR"));
+                return Err(owned_startup_failure(
+                    &mut owned_process,
+                    "DESKTOP_SIDECAR_EVENT_ERROR",
+                ));
             }
         };
         if exited {
             cleanup_ready_files(&ready_file);
-            return Err(anyhow!("DESKTOP_SIDECAR_TERMINATED_BEFORE_READY"));
+            return Err(owned_startup_failure(
+                &mut owned_process,
+                "DESKTOP_SIDECAR_TERMINATED_BEFORE_READY",
+            ));
         }
         if tokio::time::Instant::now() >= deadline {
             cleanup_ready_files(&ready_file);
-            let _ = stop_child(&mut child);
-            return Err(anyhow!("DESKTOP_SIDECAR_READY_TIMEOUT"));
+            return Err(owned_startup_failure(
+                &mut owned_process,
+                "DESKTOP_SIDECAR_READY_TIMEOUT",
+            ));
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
@@ -400,23 +460,50 @@ pub async fn start_backend(app: AppHandle) -> Result<BackendProcess> {
             base_url: format!("http://{}:{}", ready.host, ready.port),
             token,
         },
-        child,
+        owned_process,
         data_dir,
         sidecar_pid: ready.pid,
+        sidecar_port: ready.port,
         smoke_root,
     })
 }
 
 pub async fn run_packaged_smoke(app: AppHandle, context: PackagedSmokeContext) {
+    let started = serde_json::json!({"sidecar_pid": context.sidecar_pid});
+    let started_temporary = context.root.join("started.json.tmp");
+    let started_destination = context.root.join("started.json");
+    let started_written = serde_json::to_vec(&started)
+        .map_err(|_| ())
+        .and_then(|bytes| std::fs::write(&started_temporary, bytes).map_err(|_| ()))
+        .and_then(|_| std::fs::rename(&started_temporary, &started_destination).map_err(|_| ()))
+        .is_ok();
+    if !started_written {
+        record_packaged_smoke_failure(&anyhow!("RC_SMOKE_STARTED_WRITE_FAILED"));
+        if let Some(state) = app.try_state::<BackendState>() {
+            let _ = state.stop();
+        }
+        app.exit(1);
+        return;
+    }
+
     let database = context.data_dir.join("qian-labor.db");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while !database.is_file() && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let database_created = database.is_file();
+    let cleanup_complete = app
+        .try_state::<BackendState>()
+        .is_some_and(|state| state.stop().is_ok());
+    if !cleanup_complete {
+        record_packaged_smoke_failure(&anyhow!("RC_SMOKE_SIDECAR_CLEANUP_FAILED"));
+        app.exit(1);
+        return;
+    }
     let result = serde_json::json!({
         "database_created": database_created,
         "sidecar_pid": context.sidecar_pid,
+        "cleanup_complete": cleanup_complete,
     });
     let temporary = context.root.join("result.json.tmp");
     let destination = context.root.join("result.json");
@@ -425,7 +512,11 @@ pub async fn run_packaged_smoke(app: AppHandle, context: PackagedSmokeContext) {
         .and_then(|bytes| std::fs::write(&temporary, bytes).map_err(|_| ()))
         .and_then(|_| std::fs::rename(&temporary, &destination).map_err(|_| ()))
         .is_ok();
-    app.exit(if database_created && written { 0 } else { 1 });
+    app.exit(if database_created && cleanup_complete && written {
+        0
+    } else {
+        1
+    });
 }
 
 #[tauri::command]
@@ -437,7 +528,63 @@ pub fn desktop_backend_info(state: State<'_, BackendState>) -> Result<DesktopBac
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    use std::sync::{Arc, Mutex as TestMutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct FakeOwnedProcess {
+        events: Arc<TestMutex<Vec<&'static str>>>,
+        exited: bool,
+        wait_result: Result<bool, String>,
+        finalize_result: Result<(), String>,
+        force_result: Result<(), String>,
+    }
+
+    impl OwnedProcessControl for FakeOwnedProcess {
+        fn sidecar_exited(&mut self) -> Result<bool, String> {
+            self.events.lock().unwrap().push("status");
+            Ok(self.exited)
+        }
+
+        fn wait_for_sidecar_exit(&mut self, _timeout: Duration) -> Result<bool, String> {
+            self.events.lock().unwrap().push("wait");
+            self.wait_result.clone()
+        }
+
+        fn finalize_after_graceful(&mut self) -> Result<(), String> {
+            self.events.lock().unwrap().push("finalize");
+            self.finalize_result.clone()
+        }
+
+        fn force_cleanup(&mut self) -> Result<(), String> {
+            self.events.lock().unwrap().push("force");
+            self.force_result.clone()
+        }
+    }
+
+    fn fake_owned(events: &Arc<TestMutex<Vec<&'static str>>>) -> FakeOwnedProcess {
+        FakeOwnedProcess {
+            events: Arc::clone(events),
+            exited: false,
+            wait_result: Ok(true),
+            finalize_result: Ok(()),
+            force_result: Ok(()),
+        }
+    }
+
+    struct FakeBackend {
+        stops: Arc<TestMutex<usize>>,
+        reported_ready_pid: u32,
+        unrelated_process_terminated: Arc<TestMutex<bool>>,
+    }
+
+    impl StoppableBackend for FakeBackend {
+        fn stop_backend(&mut self) -> Result<(), String> {
+            let _diagnostic_only = self.reported_ready_pid;
+            *self.stops.lock().unwrap() += 1;
+            assert!(!*self.unrelated_process_terminated.lock().unwrap());
+            Ok(())
+        }
+    }
 
     fn smoke_test_root(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -476,6 +623,88 @@ mod tests {
         assert_eq!(second.len(), 64);
         assert!(first.chars().all(|value| value.is_ascii_hexdigit()));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn stop_attempts_owned_cleanup_after_graceful_shutdown_failure() {
+        let events = Arc::new(TestMutex::new(Vec::new()));
+        let mut owned = fake_owned(&events);
+
+        let result = shutdown_owned_process(&mut owned, || {
+            events.lock().unwrap().push("graceful");
+            Err("DESKTOP_GRACEFUL_SHUTDOWN_FAILED".to_string())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["status", "graceful", "wait", "force"]
+        );
+    }
+
+    #[test]
+    fn stop_attempts_all_cleanup_steps_when_one_step_fails() {
+        let events = Arc::new(TestMutex::new(Vec::new()));
+        let mut owned = fake_owned(&events);
+        owned.wait_result = Err("DESKTOP_PROCESS_WAIT_FAILED".to_string());
+
+        let result = shutdown_owned_process(&mut owned, || {
+            events.lock().unwrap().push("graceful");
+            Err("DESKTOP_GRACEFUL_SHUTDOWN_FAILED".to_string())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["status", "graceful", "wait", "force"]
+        );
+    }
+
+    #[test]
+    fn clean_graceful_exit_skips_forced_cleanup() {
+        let events = Arc::new(TestMutex::new(Vec::new()));
+        let mut owned = fake_owned(&events);
+
+        let result = shutdown_owned_process(&mut owned, || {
+            events.lock().unwrap().push("graceful");
+            Ok(())
+        });
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["status", "graceful", "wait", "finalize"]
+        );
+    }
+
+    #[test]
+    fn ready_pid_is_diagnostic_only_and_reused_pid_is_not_targeted() {
+        let stops = Arc::new(TestMutex::new(0));
+        let unrelated_process_terminated = Arc::new(TestMutex::new(false));
+        let state = BackendState::<FakeBackend>::default();
+        state
+            .install(FakeBackend {
+                stops: Arc::clone(&stops),
+                reported_ready_pid: 4242,
+                unrelated_process_terminated: Arc::clone(&unrelated_process_terminated),
+            })
+            .expect("install fake backend");
+
+        assert_eq!(state.stop(), Ok(()));
+        assert_eq!(state.stop(), Ok(()));
+        assert_eq!(*stops.lock().unwrap(), 1);
+        assert!(!*unrelated_process_terminated.lock().unwrap());
+    }
+
+    #[test]
+    fn startup_failure_cleans_owned_process_tree() {
+        let events = Arc::new(TestMutex::new(Vec::new()));
+        let mut owned = fake_owned(&events);
+
+        let error = owned_startup_failure(&mut owned, "DESKTOP_READY_JSON_INVALID");
+
+        assert_eq!(error.to_string(), "DESKTOP_READY_JSON_INVALID");
+        assert_eq!(*events.lock().unwrap(), vec!["force"]);
     }
 
     #[test]

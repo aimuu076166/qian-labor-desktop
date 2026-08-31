@@ -217,6 +217,11 @@ def test_platform_manifests_combine_into_sorted_verified_evidence(tmp_path: Path
     assert combined["notarized"] is False
     assert combined["real_provider_smoke"] == "NOT_RUN"
     assert combined["image_input"] == "NOT_RUN"
+    assert combined["abnormal_lifecycle_smoke"] == "PASS"
+    assert all(
+        evidence["abnormal_lifecycle_smoke"] == "PASS"
+        for evidence in combined["platform_evidence"]
+    )
     names = [entry["artifact_name"] for entry in combined["artifacts"]]
     assert names == sorted(names)
     checksum_names = [line.split("  ", 1)[1] for line in (output / "SHA256SUMS.txt").read_text().splitlines()]
@@ -315,6 +320,29 @@ def test_not_run_packaged_smoke_requires_a_stable_technical_reason(tmp_path: Pat
     assert payload["packaged_app_smoke_reason"] == "HOSTED_RUNNER_GUI_UNAVAILABLE"
 
 
+def test_platform_manifest_rejects_missing_abnormal_lifecycle_pass(tmp_path: Path) -> None:
+    manifest = _load("rc_manifest")
+    artifact = tmp_path / "qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe"
+    artifact.write_bytes(b"installer")
+
+    with pytest.raises(manifest.ManifestError) as captured:
+        manifest.create_platform_manifest(
+            [artifact],
+            tmp_path / "platform.json",
+            "windows",
+            "x64",
+            COMMIT,
+            "PASS",
+            "PASS",
+            {"node": "v22", "pnpm": "9.15.0", "python": "3.12", "rustc": "1.98.0"},
+            {"repository": "owner/repo", "run_id": "123", "run_attempt": "1"},
+            "2026-08-31T00:00:00Z",
+            abnormal_lifecycle_smoke="NOT_RUN",
+        )
+
+    assert captured.value.code == "ABNORMAL_LIFECYCLE_SMOKE_INVALID"
+
+
 def test_packaged_smoke_result_requires_database_and_non_sensitive_pid() -> None:
     smoke = _load("smoke_packaged_app")
     with tempfile.TemporaryDirectory(prefix="qian-rc-smoke-test-") as temporary:
@@ -325,19 +353,40 @@ def test_packaged_smoke_result_requires_database_and_non_sensitive_pid() -> None
 
         pid = smoke.validate_smoke_result(
             root,
-            {"database_created": True, "sidecar_pid": 999_999_999},
+            {
+                "database_created": True,
+                "cleanup_complete": True,
+                "sidecar_pid": 999_999_999,
+            },
         )
 
         assert pid == 999_999_999
+
+
+def test_packaged_smoke_started_evidence_contains_only_diagnostic_pid() -> None:
+    smoke = _load("smoke_packaged_app")
+
+    assert smoke.validate_smoke_started({"sidecar_pid": 999_999_999}) == 999_999_999
+    with pytest.raises(smoke.PackagedSmokeError):
+        smoke.validate_smoke_started(
+            {"sidecar_pid": 999_999_999, "token": "must-not-exist"}
+        )
 
 
 @pytest.mark.parametrize(
     "payload",
     [
         {},
-        {"database_created": False, "sidecar_pid": 4},
-        {"database_created": True, "sidecar_pid": "4"},
-        {"database_created": True, "sidecar_pid": 4, "token": "must-not-exist"},
+        {"database_created": False, "cleanup_complete": True, "sidecar_pid": 4},
+        {"database_created": True, "cleanup_complete": False, "sidecar_pid": 4},
+        {"database_created": True, "cleanup_complete": True, "sidecar_pid": "4"},
+        {"database_created": True, "sidecar_pid": 4},
+        {
+            "database_created": True,
+            "cleanup_complete": True,
+            "sidecar_pid": 4,
+            "token": "must-not-exist",
+        },
     ],
 )
 def test_packaged_smoke_result_rejects_unverifiable_evidence(
@@ -371,7 +420,8 @@ def test_packaged_smoke_distinguishes_nonzero_exit_after_valid_result(tmp_path: 
     data_dir.mkdir()
     (data_dir / "qian-labor.db").write_bytes(b"sqlite")
     (tmp_path / "result.json").write_text(
-        '{"database_created":true,"sidecar_pid":999999999}', encoding="utf-8"
+        '{"database_created":true,"cleanup_complete":true,"sidecar_pid":999999999}',
+        encoding="utf-8",
     )
 
     assert smoke.diagnose_nonzero_exit(tmp_path) == "APP_EXIT_FAILED:AFTER_VALID_RESULT"

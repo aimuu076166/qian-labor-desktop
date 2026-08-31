@@ -101,3 +101,60 @@ def test_desktop_entrypoint_writes_an_atomic_token_free_ready_file(tmp_path: Pat
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+
+
+def test_desktop_entrypoint_authenticated_shutdown_exits_cleanly_without_token_leak(
+    tmp_path: Path,
+) -> None:
+    token = "entrypoint-shutdown-token-that-must-never-be-printed"
+    env = {
+        **os.environ,
+        "QIAN_DESKTOP_DATA_DIR": str(tmp_path),
+        "QIAN_DESKTOP_TOKEN": token,
+        "QIAN_DESKTOP_PORT": "0",
+    }
+    process = subprocess.Popen(
+        [sys.executable, str(ROOT / "desktop_entrypoint.py")],
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        deadline = time.monotonic() + 15
+        ready_line = ""
+        while time.monotonic() < deadline:
+            line = process.stdout.readline().strip()
+            if line.startswith("QIAN_DESKTOP_READY="):
+                ready_line = line
+                break
+            if process.poll() is not None:
+                break
+        assert ready_line, "sidecar did not emit a READY line"
+        payload = json.loads(ready_line.split("=", 1)[1])
+        endpoint = f"http://127.0.0.1:{payload['port']}/api/internal/shutdown"
+
+        assert httpx.post(endpoint, timeout=3).status_code == 401
+        assert process.poll() is None
+        response = httpx.post(
+            endpoint,
+            headers={"X-Qian-Desktop-Token": token},
+            timeout=3,
+        )
+        assert response.status_code == 202
+        assert response.json() == {"status": "shutdown_requested"}
+        assert token not in response.text
+
+        assert process.wait(timeout=10) == 0
+        assert process.stderr is not None
+        assert token not in process.stderr.read()
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)

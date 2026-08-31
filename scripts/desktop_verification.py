@@ -50,6 +50,7 @@ class RunningSidecar:
     process: subprocess.Popen[str]
     base_url: str
     ready_pid: int
+    launch_token: str
 
 
 def _write_fixture(path: Path) -> None:
@@ -146,7 +147,7 @@ def _start_sidecar(
             raise VerificationError("READY_INVALID")
         if not isinstance(pid, int) or pid <= 0:
             raise VerificationError("READY_INVALID")
-        return RunningSidecar(process, f"http://{host}:{port}", pid)
+        return RunningSidecar(process, f"http://{host}:{port}", pid, token)
     raise VerificationError("READY_TIMEOUT")
 
 
@@ -179,36 +180,50 @@ def _pid_is_alive(pid: int) -> bool:
 
 def _stop_sidecar(running: RunningSidecar) -> None:
     process = running.process
+    shutdown_error: VerificationError | None = None
     if process.poll() is None:
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-        else:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
         try:
+            response = httpx.post(
+                f"{running.base_url}/api/internal/shutdown",
+                headers={"X-Qian-Desktop-Token": running.launch_token},
+                timeout=3,
+            )
+            if response.status_code != 202:
+                raise VerificationError("SHUTDOWN_REQUEST_FAILED")
             process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            if os.name != "nt":
+        except (httpx.HTTPError, subprocess.TimeoutExpired, VerificationError):
+            shutdown_error = VerificationError("SHUTDOWN_REQUEST_FAILED")
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            else:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
+                    os.killpg(process.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
-            else:
-                process.kill()
-            process.wait(timeout=10)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                if os.name != "nt":
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    process.kill()
+                process.wait(timeout=10)
 
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and _pid_is_alive(running.ready_pid):
         time.sleep(0.05)
     if _pid_is_alive(running.ready_pid):
         raise VerificationError("SHUTDOWN_TIMEOUT")
+    if shutdown_error is not None:
+        raise shutdown_error
 
 
 def _poll(client: httpx.Client, analysis_id: str) -> dict[str, object]:

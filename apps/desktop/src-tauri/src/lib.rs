@@ -1,10 +1,11 @@
+mod process_ownership;
 mod sidecar;
 
 use std::io;
 
 use sidecar::{
     desktop_backend_info, record_packaged_smoke_failure, run_packaged_smoke, start_backend,
-    BackendState,
+    BackendProcess, BackendState,
 };
 use tauri::{Manager, RunEvent};
 
@@ -16,7 +17,7 @@ fn startup_error(code: &'static str) -> Box<dyn std::error::Error> {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(BackendState::default())
+        .manage(BackendState::<BackendProcess>::default())
         .invoke_handler(tauri::generate_handler![desktop_backend_info])
         .setup(|app| {
             let backend = match tauri::async_runtime::block_on(start_backend(app.handle().clone()))
