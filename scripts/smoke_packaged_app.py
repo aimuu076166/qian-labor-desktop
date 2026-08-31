@@ -7,6 +7,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -151,11 +152,34 @@ def _validate_binary(path: Path) -> Path:
     return path.resolve()
 
 
+def remove_temporary_tree_when_released(root: Path, timeout: float = 15) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        cleanup_error: OSError | None = None
+        try:
+            shutil.rmtree(root)
+        except OSError as error:
+            cleanup_error = error
+
+        try:
+            root.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            cleanup_error = cleanup_error or error
+        else:
+            cleanup_error = cleanup_error or OSError("temporary root still exists")
+
+        if time.monotonic() >= deadline:
+            raise PackagedSmokeError("SIDECAR_DATA_LOCK_RESIDUE") from cleanup_error
+        time.sleep(0.1)
+
+
 def smoke_packaged_app(binary: Path) -> None:
     executable = _validate_binary(binary)
     process: subprocess.Popen[bytes] | None = None
-    with tempfile.TemporaryDirectory(prefix="qian-rc-smoke-") as temporary:
-        root = Path(temporary).resolve()
+    root = Path(tempfile.mkdtemp(prefix="qian-rc-smoke-")).resolve()
+    try:
         env = {
             **os.environ,
             "AI_PROVIDER": "fake",
@@ -196,13 +220,15 @@ def smoke_packaged_app(binary: Path) -> None:
         finally:
             if process is not None:
                 _terminate_process_tree(process)
+    finally:
+        remove_temporary_tree_when_released(root)
 
 
 def smoke_abnormal_lifecycle(binary: Path) -> None:
     executable = _validate_binary(binary)
     process: subprocess.Popen[bytes] | None = None
-    with tempfile.TemporaryDirectory(prefix="qian-rc-smoke-") as temporary:
-        root = Path(temporary).resolve()
+    root = Path(tempfile.mkdtemp(prefix="qian-rc-smoke-")).resolve()
+    try:
         env = {
             **os.environ,
             "AI_PROVIDER": "fake",
@@ -247,6 +273,8 @@ def smoke_abnormal_lifecycle(binary: Path) -> None:
         finally:
             if process is not None:
                 _terminate_process_tree(process)
+    finally:
+        remove_temporary_tree_when_released(root)
 
 
 def _parser() -> argparse.ArgumentParser:

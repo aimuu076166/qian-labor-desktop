@@ -373,6 +373,92 @@ def test_packaged_smoke_started_evidence_contains_only_diagnostic_pid() -> None:
         )
 
 
+def test_packaged_smoke_retries_transient_windows_data_directory_locks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    smoke = _load("smoke_packaged_app")
+    root = tmp_path / "smoke"
+    root.mkdir()
+    attempts = 0
+
+    def transiently_locked(path: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError(32, "file is in use", path / "app-data" / "qian-labor.db")
+        path.rmdir()
+
+    monkeypatch.setattr(smoke.shutil, "rmtree", transiently_locked)
+    monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
+
+    smoke.remove_temporary_tree_when_released(root, timeout=1)
+
+    assert attempts == 3
+    assert not root.exists()
+
+
+def test_packaged_smoke_retries_nested_file_disappearance_while_root_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    smoke = _load("smoke_packaged_app")
+    root = tmp_path / "smoke"
+    root.mkdir()
+    (root / "qian-labor.db").write_bytes(b"sqlite")
+    real_rmtree = smoke.shutil.rmtree
+    attempts = 0
+
+    def nested_file_disappeared(path: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise FileNotFoundError(2, "file disappeared", path / "qian-labor.db-wal")
+        real_rmtree(path)
+
+    monkeypatch.setattr(smoke.shutil, "rmtree", nested_file_disappeared)
+    monkeypatch.setattr(smoke.time, "sleep", lambda _seconds: None)
+
+    smoke.remove_temporary_tree_when_released(root, timeout=1)
+
+    assert attempts == 2
+    assert not root.exists()
+
+
+def test_packaged_smoke_fails_closed_when_data_directory_lock_persists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    smoke = _load("smoke_packaged_app")
+    monotonic_values = iter((0.0, 1.0))
+
+    def persistently_locked(path: Path) -> None:
+        raise PermissionError(32, "file is in use", path / "app-data" / "qian-labor.db")
+
+    monkeypatch.setattr(smoke.shutil, "rmtree", persistently_locked)
+    monkeypatch.setattr(smoke.time, "monotonic", lambda: next(monotonic_values))
+
+    with pytest.raises(smoke.PackagedSmokeError) as captured:
+        smoke.remove_temporary_tree_when_released(tmp_path, timeout=0.1)
+
+    assert captured.value.code == "SIDECAR_DATA_LOCK_RESIDUE"
+
+
+def test_packaged_smoke_wraps_non_permission_cleanup_errors_in_stable_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    smoke = _load("smoke_packaged_app")
+    monotonic_values = iter((0.0, 1.0))
+
+    def directory_not_empty(path: Path) -> None:
+        raise OSError(145, "directory is not empty", path)
+
+    monkeypatch.setattr(smoke.shutil, "rmtree", directory_not_empty)
+    monkeypatch.setattr(smoke.time, "monotonic", lambda: next(monotonic_values))
+
+    with pytest.raises(smoke.PackagedSmokeError) as captured:
+        smoke.remove_temporary_tree_when_released(tmp_path, timeout=0.1)
+
+    assert captured.value.code == "SIDECAR_DATA_LOCK_RESIDUE"
+
+
 @pytest.mark.parametrize(
     "payload",
     [
