@@ -105,7 +105,7 @@ impl PlatformOwnedProcess {
         anchor
             .arg("-c")
             .arg(
-                "trap '' TERM; IFS= read -r _ || true; kill -TERM -- -$$; /bin/sleep 1; kill -KILL -- -$$",
+                "trap '' TERM; IFS= read -r _ || true; /bin/kill -TERM -- -$$; /bin/sleep 1; /bin/kill -KILL -- -$$",
             )
             .current_dir(spec.current_dir)
             .stdin(Stdio::from(anchor_input))
@@ -250,6 +250,12 @@ struct PlatformOwnedProcess {
     job: windows_sys::Win32::Foundation::HANDLE,
     cleaned: bool,
 }
+
+// SAFETY: Windows process and job HANDLE values may be used from any thread. This type owns both
+// handles exclusively, and every access is serialized by BackendState's Mutex before the value can
+// cross a thread boundary.
+#[cfg(windows)]
+unsafe impl Send for PlatformOwnedProcess {}
 
 #[cfg(windows)]
 impl PlatformOwnedProcess {
@@ -603,6 +609,12 @@ mod tests {
 mod windows_tests {
     use super::*;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn owned_windows_handles_can_be_held_in_tauri_state() {
+        fn assert_send<T: Send>() {}
+        assert_send::<PlatformOwnedProcess>();
+    }
 
     #[test]
     fn job_cleanup_removes_descendants_but_not_unrelated_process() {
