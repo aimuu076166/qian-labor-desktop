@@ -76,8 +76,8 @@ jobs:
       - run: cd apps/desktop/src-tauri && cargo test --locked
       - run: cd apps/desktop/src-tauri && cargo check --locked
       - run: cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all --check
-      - name: Build unsigned macOS application and DMG
-        run: pnpm --dir apps/desktop tauri build --bundles app,dmg --no-sign --ci -- --locked
+      - name: Build ad-hoc signed macOS application and DMG
+        run: pnpm --dir apps/desktop tauri build --bundles app,dmg --ci -- --locked
       - run: git diff --exit-code -- apps/desktop/src-tauri/Cargo.lock
       - name: Locate exact macOS outputs
         run: |

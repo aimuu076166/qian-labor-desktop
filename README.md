@@ -152,7 +152,7 @@ export RUSTFLAGS="--remap-path-prefix=$HOME=BUILD_HOME -C link-arg=-Wl,-S -C lin
 python scripts/build_sidecar.py
 python scripts/verify_built_sidecar.py \
   --binary apps/desktop/src-tauri/binaries/qian-sidecar-aarch64-apple-darwin
-pnpm --dir apps/desktop tauri build --bundles app,dmg --no-sign --ci -- --locked
+pnpm --dir apps/desktop tauri build --bundles app,dmg --ci -- --locked
 ```
 
 Windows x64 的 NSIS 候选必须在 Windows x64 环境构建，并使用：
@@ -173,7 +173,7 @@ SHA256SUMS.txt
 BUILD-MANIFEST.json
 ```
 
-这些文件没有 Developer ID / Windows Authenticode 签名，也没有 macOS 公证，操作系统可能显示来源或安全警告。macOS 为满足本机执行要求而存在的工具生成 ad-hoc Mach-O 签名不等于 Developer ID 签名。清单必须记录 `signed=false`、`notarized=false`、真实 Provider `NOT_RUN` 和图片输入 `NOT_RUN`。
+这些文件没有 Developer ID / Windows Authenticode 签名，也没有 macOS 公证，操作系统可能显示来源或安全警告。macOS 配置 `signingIdentity: "-"` 生成完整的 ad-hoc 应用包签名，以满足 Apple Silicon 本机执行和完整性校验要求；该签名不等于 Developer ID 签名。清单必须记录 `signed=false`、`notarized=false`、真实 Provider `NOT_RUN` 和图片输入 `NOT_RUN`。
 
 下载后应先在同一目录核对清单。macOS/Linux 可运行：
 

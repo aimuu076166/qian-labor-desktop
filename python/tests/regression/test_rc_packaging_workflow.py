@@ -76,7 +76,8 @@ def test_rc_platform_jobs_pin_tools_and_execute_real_acceptance() -> None:
     macos = _job_block(workflow, "macos-arm64-rc")
     assert "-C link-arg=-Wl,-S" in macos
     assert "-C link-arg=-Wl,-x" in macos
-    assert "--bundles app,dmg --no-sign --ci -- --locked" in macos
+    assert "--bundles app,dmg --ci -- --locked" in macos
+    assert "--bundles app,dmg --no-sign" not in macos
     windows = _job_block(workflow, "windows-x64-rc")
     assert "-C strip=symbols" in windows
     assert "--bundles nsis --no-sign --ci -- --locked" in windows

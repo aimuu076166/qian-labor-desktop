@@ -29,6 +29,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/qian-sidecar"]
+    "externalBin": ["binaries/qian-sidecar"],
+    "macOS": {
+      "signingIdentity": "-"
+    }
   }
 }

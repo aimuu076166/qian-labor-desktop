@@ -5,6 +5,7 @@ import json
 import plistlib
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -76,6 +77,40 @@ def test_bundle_verifier_accepts_expected_macos_and_windows_architectures(tmp_pa
     assert verifier.detect_pe_arch(windows / "qian-sidecar.exe") == "x64"
     verifier.verify_payload(_mac_app(tmp_path / "second"), "macos", CONFIG)
     verifier.verify_payload(windows, "windows", CONFIG, verify_windows_version=False)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS codesign is required")
+def test_macos_cli_rejects_a_bundle_without_a_valid_code_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    verifier = _load("verify_rc_bundle")
+    app = _mac_app(tmp_path)
+    head = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "verify_rc_bundle.py",
+            "--platform",
+            "macos",
+            "--payload",
+            str(app),
+            "--source-config",
+            str(CONFIG),
+            "--expected-commit",
+            head,
+            "--repo-root",
+            str(ROOT),
+        ],
+    )
+
+    assert verifier.main() == 1
+    assert capsys.readouterr().err.strip() == "RC_BUNDLE_VERIFY=FAIL:SIGNATURE_INVALID"
 
 
 @pytest.mark.parametrize(

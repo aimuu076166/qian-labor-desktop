@@ -212,6 +212,17 @@ def _verify_macos(payload: Path, config: dict[str, object]) -> None:
         raise BundleVerificationError("ARCHITECTURE_INVALID")
 
 
+def verify_macos_code_signature(payload: Path) -> None:
+    completed = subprocess.run(
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=4", str(payload)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise BundleVerificationError("SIGNATURE_INVALID")
+
+
 def _verify_windows(
     payload: Path, config: dict[str, object], *, verify_windows_version: bool
 ) -> None:
@@ -279,16 +290,21 @@ def main() -> int:
         _verify_commit(args.expected_commit, args.repo_root)
         for payload in args.payload:
             verify_payload(payload, args.platform, args.source_config)
+            if args.platform == "macos":
+                verify_macos_code_signature(payload)
     except BundleVerificationError as error:
         print(f"RC_BUNDLE_VERIFY=FAIL:{error.code}", file=sys.stderr)
         return 1
-    for marker in (
+    markers = [
         "BUNDLE_STRUCTURE=PASS",
         "BUNDLE_ARCHITECTURE=PASS",
         "BUNDLE_VERSION_IDENTIFIER=PASS",
         "BUNDLE_PAYLOAD_SECURITY=PASS",
-        "RC_BUNDLE_VERIFY=PASS",
-    ):
+    ]
+    if args.platform == "macos":
+        markers.append("BUNDLE_CODE_SIGNATURE=PASS")
+    markers.append("RC_BUNDLE_VERIFY=PASS")
+    for marker in markers:
         print(marker)
     return 0
 
