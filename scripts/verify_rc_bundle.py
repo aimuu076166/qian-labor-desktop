@@ -33,6 +33,7 @@ BUILD_PATH_PATTERNS = (
     b"D:\\a\\",
     b"\\AppData\\Local\\Temp\\",
 )
+CS_RUNTIME = 0x00010000
 
 
 class BundleVerificationError(RuntimeError):
@@ -221,6 +222,43 @@ def verify_macos_code_signature(payload: Path) -> None:
     )
     if completed.returncode != 0:
         raise BundleVerificationError("SIGNATURE_INVALID")
+
+    try:
+        with (payload / "Contents" / "Info.plist").open("rb") as handle:
+            executable_name = plistlib.load(handle)["CFBundleExecutable"]
+    except (OSError, KeyError, plistlib.InvalidFileException) as error:
+        raise BundleVerificationError("SIGNATURE_INVALID") from error
+    main = payload / "Contents" / "MacOS" / executable_name
+    sidecars = [path for path in payload.rglob("qian-sidecar*") if path.is_file()]
+    if not main.is_file() or len(sidecars) != 1:
+        raise BundleVerificationError("SIGNATURE_INVALID")
+
+    for signed_path in (payload, main, sidecars[0]):
+        described = subprocess.run(
+            ["/usr/bin/codesign", "--display", "--verbose=4", str(signed_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        details = described.stdout + described.stderr
+        if described.returncode != 0:
+            raise BundleVerificationError("SIGNATURE_INVALID")
+        detail_lines = {line.strip() for line in details.splitlines()}
+        if "Signature=adhoc" not in detail_lines or "TeamIdentifier=not set" not in detail_lines:
+            raise BundleVerificationError("ADHOC_SIGNATURE_REQUIRED")
+        code_directories = [
+            line for line in detail_lines if line.startswith("CodeDirectory ")
+        ]
+        if not code_directories:
+            raise BundleVerificationError("SIGNATURE_INVALID")
+        for code_directory in code_directories:
+            flags_match = re.search(
+                r"(?:^|\s)flags=0x([0-9A-Fa-f]+)(?=\(|\s|$)", code_directory
+            )
+            if flags_match is None:
+                raise BundleVerificationError("SIGNATURE_INVALID")
+            if int(flags_match.group(1), 16) & CS_RUNTIME:
+                raise BundleVerificationError("HARDENED_RUNTIME_UNEXPECTED")
 
 
 def _verify_windows(

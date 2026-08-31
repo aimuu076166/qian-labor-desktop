@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import plistlib
+import shutil
 import stat
 import struct
 import subprocess
@@ -61,6 +62,21 @@ def _mac_app(root: Path) -> Path:
     return app
 
 
+def _codesign_real_macos_app(app: Path, *, hardened_runtime: bool) -> None:
+    main = app / "Contents" / "MacOS" / "qian-labor-desktop"
+    sidecar = app / "Contents" / "MacOS" / "qian-sidecar"
+    for executable in (main, sidecar):
+        shutil.copyfile("/usr/bin/true", executable)
+        executable.chmod(0o755)
+    options = ["--options", "runtime"] if hardened_runtime else []
+    for signed_path in (sidecar, main, app):
+        subprocess.run(
+            ["codesign", "--force", "--sign", "-", *options, str(signed_path)],
+            check=True,
+            capture_output=True,
+        )
+
+
 def _windows_payload(root: Path) -> Path:
     payload = root / "installed"
     payload.mkdir()
@@ -111,6 +127,121 @@ def test_macos_cli_rejects_a_bundle_without_a_valid_code_signature(
 
     assert verifier.main() == 1
     assert capsys.readouterr().err.strip() == "RC_BUNDLE_VERIFY=FAIL:SIGNATURE_INVALID"
+
+
+def test_macos_ad_hoc_config_disables_hardened_runtime() -> None:
+    config = json.loads(CONFIG.read_text(encoding="utf-8"))
+    macos = config["bundle"]["macOS"]
+
+    assert macos["signingIdentity"] == "-"
+    assert macos["hardenedRuntime"] is False
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS codesign is required")
+def test_macos_signature_gate_rejects_hardened_runtime_sidecar(tmp_path: Path) -> None:
+    verifier = _load("verify_rc_bundle")
+    app = _mac_app(tmp_path)
+    _codesign_real_macos_app(app, hardened_runtime=True)
+
+    with pytest.raises(verifier.BundleVerificationError) as captured:
+        verifier.verify_macos_code_signature(app)
+
+    assert captured.value.code == "HARDENED_RUNTIME_UNEXPECTED"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS codesign is required")
+def test_macos_signature_gate_accepts_non_hardened_ad_hoc_bundle(tmp_path: Path) -> None:
+    verifier = _load("verify_rc_bundle")
+    app = _mac_app(tmp_path)
+    _codesign_real_macos_app(app, hardened_runtime=False)
+
+    verifier.verify_macos_code_signature(app)
+
+
+def _mock_codesign_descriptions(
+    verifier, monkeypatch: pytest.MonkeyPatch, details: str
+) -> None:
+    calls = 0
+
+    def fake_run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "", details)
+
+    monkeypatch.setattr(verifier.subprocess, "run", fake_run)
+
+
+def test_macos_signature_gate_rejects_missing_code_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = _load("verify_rc_bundle")
+    app = _mac_app(tmp_path)
+    _mock_codesign_descriptions(
+        verifier,
+        monkeypatch,
+        "Executable=/tmp/Qian.app\nSignature=adhoc\nTeamIdentifier=not set\n",
+    )
+
+    with pytest.raises(verifier.BundleVerificationError) as captured:
+        verifier.verify_macos_code_signature(app)
+
+    assert captured.value.code == "SIGNATURE_INVALID"
+
+
+def test_macos_signature_gate_rejects_runtime_bit_without_runtime_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    verifier = _load("verify_rc_bundle")
+    app = _mac_app(tmp_path)
+    _mock_codesign_descriptions(
+        verifier,
+        monkeypatch,
+        "CodeDirectory v=20400 size=1 flags=0x10002(adhoc) hashes=1+0 location=embedded\n"
+        "Signature=adhoc\nTeamIdentifier=not set\n",
+    )
+
+    with pytest.raises(verifier.BundleVerificationError) as captured:
+        verifier.verify_macos_code_signature(app)
+
+    assert captured.value.code == "HARDENED_RUNTIME_UNEXPECTED"
+
+
+@pytest.mark.parametrize(
+    ("details", "expected_code"),
+    [
+        (
+            "CodeDirectory v=20400 size=1 flags=not-hex(adhoc) hashes=1+0 location=embedded\n"
+            "Signature=adhoc\nTeamIdentifier=not set\n",
+            "SIGNATURE_INVALID",
+        ),
+        (
+            "CodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded\n"
+            "Signature=adhoc-extra\nTeamIdentifier=not set\n",
+            "ADHOC_SIGNATURE_REQUIRED",
+        ),
+        (
+            "CodeDirectory v=20400 size=1 flags=0x2(adhoc) hashes=1+0 location=embedded\n"
+            "Signature=adhoc\nTeamIdentifier=not set-extra\n",
+            "ADHOC_SIGNATURE_REQUIRED",
+        ),
+    ],
+)
+def test_macos_signature_gate_rejects_malformed_codesign_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    details: str,
+    expected_code: str,
+) -> None:
+    verifier = _load("verify_rc_bundle")
+    app = _mac_app(tmp_path)
+    _mock_codesign_descriptions(verifier, monkeypatch, details)
+
+    with pytest.raises(verifier.BundleVerificationError) as captured:
+        verifier.verify_macos_code_signature(app)
+
+    assert captured.value.code == expected_code
 
 
 @pytest.mark.parametrize(
