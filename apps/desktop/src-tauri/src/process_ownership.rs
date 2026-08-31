@@ -619,8 +619,10 @@ mod windows_tests {
     #[test]
     fn job_cleanup_removes_descendants_but_not_unrelated_process() {
         let current_dir = std::env::current_dir().expect("current directory");
+        let command_interpreter =
+            std::env::var_os("COMSPEC").expect("Windows command interpreter path");
         let spec = SpawnSpec {
-            executable: Path::new("cmd.exe"),
+            executable: Path::new(&command_interpreter),
             current_dir: &current_dir,
             args: vec![
                 OsString::from("/C"),
