@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, status as http_status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
@@ -37,6 +38,9 @@ from qian_labor.services.dashboard import DashboardService
 from qian_labor.services.deletion import DeletionService
 from qian_labor.settings import Settings, get_settings
 from qian_labor.storage.local import LocalStorage
+
+
+TAURI_PRODUCTION_ORIGINS = ("tauri://localhost", "http://tauri.localhost")
 
 
 def _processing_payload(database, analysis_id: str) -> dict[str, object]:
@@ -201,6 +205,13 @@ def create_desktop_app(
                 content={"detail": {"code": "DESKTOP_TOKEN_REQUIRED"}},
             )
         return await call_next(request)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(TAURI_PRODUCTION_ORIGINS),
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "X-Qian-Desktop-Token"],
+    )
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:

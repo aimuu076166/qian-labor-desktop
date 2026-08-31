@@ -2,6 +2,7 @@ from pathlib import Path
 from threading import Event
 from unittest.mock import Mock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from qian_labor.ai.zhipu_provider import ZhipuChatCompletionsProvider
@@ -10,6 +11,58 @@ from qian_labor.settings import Settings
 
 
 PEPPER = "desktop-zhipu-runtime-pepper-32-characters-minimum"
+TAURI_PRODUCTION_ORIGINS = ("tauri://localhost", "http://tauri.localhost")
+
+
+@pytest.mark.parametrize("origin", TAURI_PRODUCTION_ORIGINS)
+def test_business_api_allows_tauri_production_webview_origin(
+    tmp_path: Path, origin: str
+) -> None:
+    token = "cors-test-launch-token-32-characters-minimum"
+    app = create_desktop_app(data_dir=tmp_path, launch_token=token)
+
+    with TestClient(app) as client:
+        preflight = client.options(
+            "/api/analyses",
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type,x-qian-desktop-token",
+            },
+        )
+        assert preflight.status_code == 200
+        assert preflight.headers["Access-Control-Allow-Origin"] == origin
+        allowed_headers = preflight.headers["Access-Control-Allow-Headers"].lower()
+        assert "content-type" in allowed_headers
+        assert "x-qian-desktop-token" in allowed_headers
+
+        created = client.post(
+            "/api/analyses",
+            headers={"Origin": origin, "X-Qian-Desktop-Token": token},
+            json={"name": "桌面体检", "company_display_name": "虚构企业"},
+        )
+        assert created.status_code == 201
+        assert created.headers["Access-Control-Allow-Origin"] == origin
+
+
+def test_business_api_rejects_untrusted_browser_origin(tmp_path: Path) -> None:
+    app = create_desktop_app(
+        data_dir=tmp_path,
+        launch_token="untrusted-origin-token-32-characters-minimum",
+    )
+
+    with TestClient(app) as client:
+        preflight = client.options(
+            "/api/analyses",
+            headers={
+                "Origin": "https://example.invalid",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type,x-qian-desktop-token",
+            },
+        )
+
+    assert preflight.status_code != 200
+    assert "Access-Control-Allow-Origin" not in preflight.headers
 
 
 def test_health_is_public_but_business_api_requires_launch_token(tmp_path: Path) -> None:
