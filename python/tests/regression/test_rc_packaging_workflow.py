@@ -94,6 +94,22 @@ def test_rc_platform_jobs_pin_tools_and_execute_real_acceptance() -> None:
     assert "--abnormal-lifecycle" in windows
 
 
+def test_macos_rc_pins_xcode_26_2_sdk() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    macos = _job_block(workflow, "macos-arm64-rc")
+
+    assert "sudo xcode-select -s /Applications/Xcode_26.2.app" in macos
+    assert 'test "$(xcrun --sdk macosx --show-sdk-version)" = "26.2"' in macos
+
+
+def test_macos_rc_exercises_launch_services_user_startup() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    macos = _job_block(workflow, "macos-arm64-rc")
+
+    assert 'python scripts/smoke_macos_user_launch.py --app "$QIAN_MOUNTED_APP"' in macos
+    assert "python/tests/regression/test_macos_user_launch_smoke.py" in macos
+
+
 def test_rc_manifest_job_downloads_and_reverifies_platform_artifacts() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     block = _job_block(workflow, "rc-manifest")
