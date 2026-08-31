@@ -20,7 +20,8 @@ PRODUCT = "qian-labor-desktop"
 MAC_APP_NAME = "qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.app.tar.gz"
 MAC_DMG_NAME = "qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.dmg"
 WINDOWS_NSIS_NAME = "qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe"
-EXPECTED_NAMES = {MAC_APP_NAME, MAC_DMG_NAME, WINDOWS_NSIS_NAME}
+ALLOWED_NAMES = {MAC_APP_NAME, MAC_DMG_NAME, WINDOWS_NSIS_NAME}
+EXPECTED_NAMES = {MAC_APP_NAME, MAC_DMG_NAME}
 REQUIRED_ARTIFACT_FIELDS = {
     "platform",
     "architecture",
@@ -53,7 +54,7 @@ def _sha256(path: Path) -> str:
 
 
 def _validate_ascii_name(name: str) -> None:
-    if name not in EXPECTED_NAMES or not name.isascii() or Path(name).name != name:
+    if name not in ALLOWED_NAMES or not name.isascii() or Path(name).name != name:
         raise ManifestError("ARTIFACT_NAME_INVALID")
 
 

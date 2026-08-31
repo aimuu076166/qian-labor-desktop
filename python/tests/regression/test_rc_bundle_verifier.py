@@ -349,33 +349,25 @@ def test_bundle_error_never_echoes_a_control_character_or_secret_path(tmp_path: 
     assert secret_component not in str(captured.value)
 
 
-def test_platform_manifests_combine_into_sorted_verified_evidence(tmp_path: Path) -> None:
+def test_macos_manifest_combines_into_sorted_verified_evidence(tmp_path: Path) -> None:
     manifest = _load("rc_manifest")
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     mac_app = artifacts / "qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.app.tar.gz"
     mac_dmg = artifacts / "qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.dmg"
-    windows = artifacts / "qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe"
     mac_app.write_bytes(b"app archive")
     mac_dmg.write_bytes(b"dmg image")
-    windows.write_bytes(b"nsis installer")
     toolchain = {"node": "v22", "pnpm": "9.15.0", "python": "3.12", "rustc": "1.98.0"}
     workflow = {"repository": "owner/repo", "run_id": "123", "run_attempt": "1"}
     mac_manifest = tmp_path / "mac.json"
-    windows_manifest = tmp_path / "windows.json"
     manifest.create_platform_manifest(
         [mac_app, mac_dmg], mac_manifest, "macos", "arm64", COMMIT,
         "PASS", "PASS", toolchain, workflow, "2026-08-31T00:00:00Z",
     )
-    manifest.create_platform_manifest(
-        [windows], windows_manifest, "windows", "x64", COMMIT,
-        "PASS", "PASS", toolchain, workflow, "2026-08-31T00:00:00Z",
-    )
     assert (tmp_path / "SHA256SUMS-macos.txt").is_file()
-    assert (tmp_path / "SHA256SUMS-windows.txt").is_file()
 
     output = tmp_path / "combined"
-    combined = manifest.combine_manifests([mac_manifest, windows_manifest], artifacts, output)
+    combined = manifest.combine_manifests([mac_manifest], artifacts, output)
 
     assert combined["git_commit"] == COMMIT
     assert combined["product"] == "qian-labor-desktop"

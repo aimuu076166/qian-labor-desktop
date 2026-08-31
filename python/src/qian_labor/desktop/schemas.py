@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +20,16 @@ class CreateAnalysisRequest(BaseModel):
 
 class ImportPathsRequest(BaseModel):
     paths: list[str] = Field(min_length=1, max_length=100)
+
+
+class MatchDecisionRequest(BaseModel):
+    candidate_id: str = Field(min_length=1, max_length=36)
+    decision: Literal["assign", "create_unknown", "merge", "unmatched"]
+    employee_id: str | None = Field(default=None, max_length=36)
+    display_name: str | None = Field(default=None, max_length=100)
+    source_employee_id: str | None = Field(default=None, max_length=36)
+    target_employee_id: str | None = Field(default=None, max_length=36)
+    fact_ids: list[str] = Field(default_factory=list, max_length=500)
 
 
 class DashboardSummary(BaseModel):

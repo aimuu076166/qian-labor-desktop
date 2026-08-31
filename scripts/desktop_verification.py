@@ -32,6 +32,9 @@ MARKERS = (
     "SQLITE_PERSISTENCE=PASS",
     "SYNTHETIC_IMPORT=PASS",
     "FAKE_PROVIDER_PIPELINE=PASS",
+    "MATCHING_REVIEW=PASS",
+    "EMPLOYEE_LEDGER=PASS",
+    "REPORT=PASS",
     "R01_R20_REGRESSION=PASS",
     "SOURCE_TRACE=PASS",
     "DELETE_CLEANUP=PASS",
@@ -64,7 +67,7 @@ def _write_fixture(path: Path) -> None:
         "facts": {
             "employment.status": "active",
             "employment.contract.exists": False,
-            "employment.identity.match_status": "confirmed",
+            "employment.identity.match_status": "ambiguous",
             "employment.material_coverage": 0.4,
             "analysis.minimum_core_coverage": 0.4,
         },
@@ -301,6 +304,29 @@ def verify_command(
                 submitted = client.post(f"/api/analyses/{analysis_id}/process")
                 _assert_status(submitted, 202, "PROCESS_SUBMIT_FAILED")
                 terminal = _poll(client, analysis_id)
+                if terminal.get("status") != "matching_review":
+                    raise VerificationError("MATCHING_REVIEW_NOT_REACHED")
+                matching = client.get(
+                    f"/api/analyses/{analysis_id}/matching-candidates"
+                )
+                _assert_status(matching, 200, "MATCHING_CANDIDATES_FAILED")
+                candidates = matching.json().get("candidates", [])
+                if not isinstance(candidates, list) or len(candidates) != 1:
+                    raise VerificationError("MATCHING_CANDIDATES_INVALID")
+                candidate = candidates[0]
+                if not candidate.get("employee_id") or not candidate.get("fact_ids"):
+                    raise VerificationError("MATCHING_CANDIDATE_INCOMPLETE")
+                decision = client.post(
+                    f"/api/analyses/{analysis_id}/matching-decisions",
+                    json={
+                        "candidate_id": candidate["id"],
+                        "decision": "assign",
+                        "employee_id": candidate["employee_id"],
+                        "fact_ids": candidate["fact_ids"],
+                    },
+                )
+                _assert_status(decision, 200, "MATCHING_DECISION_FAILED")
+                terminal = _poll(client, analysis_id)
                 if terminal.get("status") != "completed":
                     raise VerificationError("FAKE_PIPELINE_NOT_COMPLETED")
                 dashboard = client.get(f"/api/analyses/{analysis_id}/dashboard")
@@ -313,6 +339,28 @@ def verify_command(
                 _assert_status(finding, 200, "FINDING_DETAIL_FAILED")
                 if not finding.json().get("sources"):
                     raise VerificationError("SOURCE_TRACE_MISSING")
+                ledger = client.get(f"/api/analyses/{analysis_id}/employees")
+                _assert_status(ledger, 200, "EMPLOYEE_LEDGER_FAILED")
+                ledger_payload = ledger.json()
+                if ledger_payload.get("total") != 1 or not ledger_payload.get("items"):
+                    raise VerificationError("EMPLOYEE_LEDGER_INVALID")
+                employee_id = str(ledger_payload["items"][0]["id"])
+                employee_detail = client.get(
+                    f"/api/analyses/{analysis_id}/employees/{employee_id}"
+                )
+                _assert_status(employee_detail, 200, "EMPLOYEE_DETAIL_FAILED")
+                if employee_detail.json().get("employee", {}).get("id") != employee_id:
+                    raise VerificationError("EMPLOYEE_DETAIL_INVALID")
+                report = client.get(f"/api/analyses/{analysis_id}/report")
+                _assert_status(report, 200, "REPORT_FAILED")
+                report_payload = report.json()
+                if (
+                    report_payload.get("summary", {}).get("employee_count")
+                    != dashboard.json().get("summary", {}).get("employee_count")
+                    or len(report_payload.get("employees", [])) != ledger_payload.get("total")
+                    or not any(item.get("sources") for item in report_payload.get("findings", []))
+                ):
+                    raise VerificationError("REPORT_INCONSISTENT")
 
             _stop_sidecar(running)
             stopped_processes += 1
@@ -332,6 +380,16 @@ def verify_command(
             ) as client:
                 persisted = client.get(f"/api/analyses/{analysis_id}/dashboard")
                 _assert_status(persisted, 200, "SQLITE_PERSISTENCE_FAILED")
+                _assert_status(
+                    client.get(f"/api/analyses/{analysis_id}/employees"),
+                    200,
+                    "EMPLOYEE_LEDGER_PERSISTENCE_FAILED",
+                )
+                _assert_status(
+                    client.get(f"/api/analyses/{analysis_id}/report"),
+                    200,
+                    "REPORT_PERSISTENCE_FAILED",
+                )
                 deleted = client.delete(f"/api/analyses/{analysis_id}")
                 _assert_status(deleted, 200, "DELETE_FAILED")
                 if deleted.json().get("status") != "deleted":
@@ -357,6 +415,10 @@ def verify_command(
                     raise VerificationError("DELETE_NOT_DURABLE")
                 if client.get(f"/api/findings/{finding_id}").status_code != 404:
                     raise VerificationError("FINDING_DELETE_NOT_DURABLE")
+                if client.get(f"/api/analyses/{analysis_id}/employees").status_code != 404:
+                    raise VerificationError("EMPLOYEE_LEDGER_DELETE_NOT_DURABLE")
+                if client.get(f"/api/analyses/{analysis_id}/report").status_code != 404:
+                    raise VerificationError("REPORT_DELETE_NOT_DURABLE")
 
             _stop_sidecar(running)
             stopped_processes += 1

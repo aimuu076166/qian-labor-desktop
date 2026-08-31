@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from qian_labor.ai.provider_factory import provider_from_settings
+from qian_labor.ai.providers import AIProviderError
 from qian_labor.database import create_desktop_database
 from qian_labor.desktop.auth import request_has_valid_token
 from qian_labor.desktop.import_service import DesktopImportService
@@ -22,8 +23,10 @@ from qian_labor.desktop.schemas import (
     FindingSummary,
     HealthResponse,
     ImportPathsRequest,
+    MatchDecisionRequest,
 )
 from qian_labor.jobs.processing import ProcessingPipeline
+from qian_labor.matching.service import EmployeeMatcher, MatchDecisionError
 from qian_labor.models.core import (
     AnalysisBatch,
     ProcessingJob,
@@ -36,6 +39,7 @@ from qian_labor.services.analyses import AnalysisService
 from qian_labor.services.assessment_gate import ensure_finding_access
 from qian_labor.services.dashboard import DashboardService
 from qian_labor.services.deletion import DeletionService
+from qian_labor.services.report import ReportService
 from qian_labor.settings import Settings, get_settings
 from qian_labor.storage.local import LocalStorage
 
@@ -193,6 +197,7 @@ def create_desktop_app(
     app.state.storage_root = storage_root
     app.state.import_service = import_service
     app.state.processing_queue = processing_queue
+    app.state.ai_provider = provider
     app.state.ai_provider_name = provider.name
 
     @app.middleware("http")
@@ -220,6 +225,41 @@ def create_desktop_app(
     @app.get("/api/status", response_model=DesktopStatusResponse)
     def status() -> DesktopStatusResponse:
         return DesktopStatusResponse(status="ready", database_path=str(database.path))
+
+    @app.get("/api/provider/status")
+    def provider_status() -> dict[str, object]:
+        external = bool(
+            getattr(
+                app.state.ai_provider,
+                "is_external",
+                app.state.ai_provider_name != "fake",
+            )
+        )
+        return {
+            "provider": app.state.ai_provider_name,
+            "mode": "real" if external else "demo",
+            "configured": external,
+        }
+
+    @app.post("/api/provider/connection-test")
+    def provider_connection_test() -> dict[str, str]:
+        external = bool(
+            getattr(
+                app.state.ai_provider,
+                "is_external",
+                app.state.ai_provider_name != "fake",
+            )
+        )
+        if not external:
+            raise HTTPException(409, {"code": "AI_PROVIDER_NOT_CONFIGURED"})
+        try:
+            app.state.ai_provider.extract(
+                "qian-provider-connection-check.txt",
+                b"QIAN_SYNTHETIC_CONNECTION_CHECK: no employee or company data.",
+            )
+        except AIProviderError as error:
+            raise HTTPException(502, {"code": str(error)}) from error
+        return {"provider": app.state.ai_provider_name, "status": "connected"}
 
     @app.post("/api/internal/shutdown", status_code=http_status.HTTP_202_ACCEPTED)
     def request_shutdown() -> dict[str, str]:
@@ -311,6 +351,37 @@ def create_desktop_app(
         except KeyError:
             raise HTTPException(404, {"code": "ANALYSIS_NOT_FOUND"}) from None
 
+    @app.get("/api/analyses/{analysis_id}/matching-candidates")
+    def matching_candidates(analysis_id: str) -> dict[str, object]:
+        try:
+            candidates = EmployeeMatcher(database).list_candidates(analysis_id)
+        except KeyError:
+            raise HTTPException(404, {"code": "ANALYSIS_NOT_FOUND"}) from None
+        except MatchDecisionError as error:
+            raise HTTPException(409, {"code": error.code}) from error
+        return {"analysis_id": analysis_id, "candidates": candidates}
+
+    @app.post("/api/analyses/{analysis_id}/matching-decisions")
+    def matching_decision(
+        analysis_id: str, body: MatchDecisionRequest
+    ) -> dict[str, object]:
+        try:
+            return EmployeeMatcher(database).decide(analysis_id, body)
+        except KeyError:
+            raise HTTPException(404, {"code": "ANALYSIS_NOT_FOUND"}) from None
+        except MatchDecisionError as error:
+            if error.code == "MATCH_CROSS_ANALYSIS_FORBIDDEN":
+                status_code = http_status.HTTP_403_FORBIDDEN
+            elif error.code in {
+                "MATCH_DECISION_STALE",
+                "MATCH_DECISION_CONFLICT",
+                "MATCH_ANALYSIS_NOT_REVIEW",
+            }:
+                status_code = http_status.HTTP_409_CONFLICT
+            else:
+                status_code = http_status.HTTP_400_BAD_REQUEST
+            raise HTTPException(status_code, {"code": error.code}) from error
+
     @app.get("/api/analyses/{analysis_id}/dashboard")
     def dashboard(analysis_id: str) -> dict[str, object]:
         service = DashboardService(database)
@@ -343,7 +414,65 @@ def create_desktop_app(
         return {
             "summary": summary.model_dump(),
             "findings": [item.model_dump() for item in finding_items],
+            "overview": dashboard_payload,
         }
+
+    @app.get("/api/analyses/{analysis_id}/employees")
+    def employee_ledger(
+        analysis_id: str,
+        query: str = "",
+        department: str | None = None,
+        severity: str | None = None,
+        insufficient_data: bool | None = None,
+        requires_human_review: bool | None = None,
+        match_status: str | None = None,
+        sort_by: str = "employee_number",
+        sort_order: str = "asc",
+        page: int = 1,
+        page_size: int = 25,
+    ) -> dict[str, object]:
+        allowed_sorts = {
+            "employee_number",
+            "masked_name",
+            "department",
+            "high_count",
+            "medium_count",
+            "insufficient_data_count",
+            "requires_human_review_count",
+            "material_coverage",
+        }
+        if sort_by not in allowed_sorts or sort_order not in {"asc", "desc"}:
+            raise HTTPException(400, {"code": "EMPLOYEE_SORT_INVALID"})
+        try:
+            return DashboardService(database).employees(
+                analysis_id,
+                query=query,
+                department=department,
+                severity=severity,
+                insufficient_data=insufficient_data,
+                requires_human_review=requires_human_review,
+                match_status=match_status,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                page=page,
+                page_size=page_size,
+            )
+        except KeyError:
+            raise HTTPException(404, {"code": "ANALYSIS_NOT_FOUND"}) from None
+
+    @app.get("/api/analyses/{analysis_id}/employees/{employee_id}")
+    def employee_detail(analysis_id: str, employee_id: str) -> dict[str, object]:
+        try:
+            return DashboardService(database).employee_detail(analysis_id, employee_id)
+        except KeyError:
+            raise HTTPException(404, {"code": "EMPLOYEE_NOT_FOUND"}) from None
+
+    @app.get("/api/analyses/{analysis_id}/report")
+    def analysis_report(analysis_id: str) -> dict[str, object]:
+        try:
+            return ReportService(database).get(analysis_id)
+        except KeyError:
+            raise HTTPException(404, {"code": "ANALYSIS_NOT_FOUND"}) from None
 
     @app.get("/api/findings/{finding_id}")
     def finding_detail(finding_id: str) -> dict[str, object]:

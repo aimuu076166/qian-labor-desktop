@@ -6,12 +6,21 @@ use std::time::{Duration, Instant};
 
 const PROCESS_ERROR: &str = "DESKTOP_OWNED_PROCESS_ERROR";
 const PROCESS_CLEANUP_ERROR: &str = "DESKTOP_OWNED_PROCESS_CLEANUP_FAILED";
+const PROVIDER_KEYS: &[&str] = &[
+    "AI_PROVIDER",
+    "AI_API_KEY",
+    "AI_BASE_URL",
+    "AI_TEXT_MODEL",
+    "AI_VISION_MODEL",
+    "PII_HASH_PEPPER",
+];
 
 struct SpawnSpec<'a> {
     executable: &'a Path,
     current_dir: &'a Path,
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
+    removed_env: &'static [&'static str],
 }
 
 impl<'a> SpawnSpec<'a> {
@@ -21,23 +30,35 @@ impl<'a> SpawnSpec<'a> {
         data_dir: &'a Path,
         token: &'a str,
         ready_file: &'a Path,
+        provider_env: &[(OsString, OsString)],
     ) -> Self {
+        let mut env = vec![
+            (
+                OsString::from("QIAN_DESKTOP_DATA_DIR"),
+                data_dir.as_os_str().to_owned(),
+            ),
+            (OsString::from("QIAN_DESKTOP_TOKEN"), OsString::from(token)),
+            (OsString::from("QIAN_DESKTOP_PORT"), OsString::from("0")),
+            (
+                OsString::from("QIAN_DESKTOP_READY_FILE"),
+                ready_file.as_os_str().to_owned(),
+            ),
+        ];
+        env.extend(
+            provider_env
+                .iter()
+                .filter(|(key, _)| {
+                    key.to_str()
+                        .is_some_and(|value| PROVIDER_KEYS.contains(&value))
+                })
+                .cloned(),
+        );
         Self {
             executable,
             current_dir,
             args: Vec::new(),
-            env: vec![
-                (
-                    OsString::from("QIAN_DESKTOP_DATA_DIR"),
-                    data_dir.as_os_str().to_owned(),
-                ),
-                (OsString::from("QIAN_DESKTOP_TOKEN"), OsString::from(token)),
-                (OsString::from("QIAN_DESKTOP_PORT"), OsString::from("0")),
-                (
-                    OsString::from("QIAN_DESKTOP_READY_FILE"),
-                    ready_file.as_os_str().to_owned(),
-                ),
-            ],
+            env,
+            removed_env: PROVIDER_KEYS,
         }
     }
 }
@@ -53,8 +74,16 @@ impl OwnedSidecarProcess {
         data_dir: &Path,
         token: &str,
         ready_file: &Path,
+        provider_env: &[(OsString, OsString)],
     ) -> Result<Self, String> {
-        let spec = SpawnSpec::sidecar(executable, current_dir, data_dir, token, ready_file);
+        let spec = SpawnSpec::sidecar(
+            executable,
+            current_dir,
+            data_dir,
+            token,
+            ready_file,
+            provider_env,
+        );
         PlatformOwnedProcess::spawn(&spec).map(|platform| Self { platform })
     }
 
@@ -112,6 +141,9 @@ impl PlatformOwnedProcess {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0);
+        for key in spec.removed_env {
+            anchor.env_remove(key);
+        }
         let mut anchor = anchor.spawn().map_err(|_| PROCESS_ERROR.to_string())?;
         let process_group = anchor.id() as libc::pid_t;
 
@@ -124,6 +156,9 @@ impl PlatformOwnedProcess {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(process_group);
+        for key in spec.removed_env {
+            command.env_remove(key);
+        }
 
         let sidecar = match command.spawn() {
             Ok(child) => child,
@@ -294,7 +329,7 @@ impl PlatformOwnedProcess {
         let executable = wide_null(spec.executable.as_os_str());
         let current_dir = wide_null(spec.current_dir.as_os_str());
         let mut command_line = windows_command_line(spec.executable.as_os_str(), &spec.args);
-        let environment = windows_environment_block(&spec.env);
+        let environment = windows_environment_block(&spec.env, spec.removed_env);
         let mut startup = STARTUPINFOW::default();
         startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
         let mut information = PROCESS_INFORMATION::default();
@@ -476,10 +511,15 @@ fn windows_command_line(executable: &OsStr, args: &[OsString]) -> Vec<u16> {
 }
 
 #[cfg(windows)]
-fn windows_environment_block(overrides: &[(OsString, OsString)]) -> Vec<u16> {
+fn windows_environment_block(overrides: &[(OsString, OsString)], removed: &[&str]) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
 
     let mut values: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    values.retain(|(candidate, _)| {
+        !removed
+            .iter()
+            .any(|key| candidate.to_string_lossy().eq_ignore_ascii_case(key))
+    });
     for (key, value) in overrides {
         let key_text = key.to_string_lossy();
         values
@@ -517,6 +557,31 @@ mod tests {
     }
 
     #[test]
+    fn sidecar_spec_includes_only_explicit_provider_session_secrets() {
+        let provider_env = vec![
+            (OsString::from("AI_PROVIDER"), OsString::from("zhipu")),
+            (
+                OsString::from("AI_API_KEY"),
+                OsString::from("synthetic-session-key"),
+            ),
+        ];
+        let spec = SpawnSpec::sidecar(
+            Path::new("/tmp/qian-sidecar"),
+            Path::new("/tmp"),
+            Path::new("/tmp/app-data"),
+            "synthetic-launch-token",
+            Path::new("/tmp/ready.json"),
+            &provider_env,
+        );
+
+        assert!(spec.env.contains(&provider_env[0]));
+        assert!(spec.env.contains(&provider_env[1]));
+        assert_eq!(spec.env.len(), 6);
+        assert!(spec.removed_env.contains(&"AI_API_KEY"));
+        assert!(spec.removed_env.contains(&"PII_HASH_PEPPER"));
+    }
+
+    #[test]
     fn owned_group_cleanup_does_not_target_unrelated_process() {
         let temp = temporary_directory("cleanup");
         std::fs::create_dir_all(&temp).expect("create process ownership test directory");
@@ -530,6 +595,7 @@ mod tests {
             current_dir: &temp,
             args: vec![OsString::from("-c"), OsString::from(script)],
             env: Vec::new(),
+            removed_env: &[],
         };
         let mut owned = PlatformOwnedProcess::spawn(&spec).expect("spawn owned process tree");
         let mut unrelated = Command::new("/bin/sleep")
@@ -569,6 +635,7 @@ mod tests {
             current_dir: &temp,
             args: vec![OsString::from("-c"), OsString::from("sleep 60 & wait")],
             env: Vec::new(),
+            removed_env: &[],
         };
         let mut owned = PlatformOwnedProcess::spawn(&spec).expect("spawn watchdog process tree");
         let mut unrelated = Command::new("/bin/sleep")
@@ -631,6 +698,7 @@ mod windows_tests {
                 ),
             ],
             env: Vec::new(),
+            removed_env: &[],
         };
         let mut owned = PlatformOwnedProcess::spawn(&spec).expect("spawn owned Windows tree");
         let mut unrelated = Command::new("cmd.exe")

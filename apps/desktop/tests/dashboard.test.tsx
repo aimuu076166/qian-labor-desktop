@@ -42,7 +42,35 @@ describe('desktop analysis views', () => {
             requires_human_review: false,
           },
         ]}
+        overview={{
+          company_name: '完全虚构企业',
+          summary: {
+            coverage_rate: 0.6,
+            affected_employee_count: 2,
+            requires_human_review_count: 1,
+            deadline_30_count: 0,
+            classification_pending: false,
+          },
+          categories: [{ code: 'contract', label: '劳动合同', count: 2 }],
+          material_coverage: {
+            overall: 0.6,
+            classification_pending: false,
+            items: [
+              {
+                code: 'contract',
+                label: '劳动合同',
+                covered: 3,
+                applicable: 5,
+                rate: 0.6,
+                not_applicable: false,
+                classification_pending: false,
+              },
+            ],
+          },
+        }}
         onSelectFinding={vi.fn()}
+        onOpenEmployees={vi.fn()}
+        onOpenReport={vi.fn()}
       />,
     );
 
@@ -50,7 +78,33 @@ describe('desktop analysis views', () => {
     expect(screen.getByText('资料不足')).toBeInTheDocument();
     expect(screen.getByText('疑似风险')).toBeInTheDocument();
     expect(screen.getByText('需要人工复核')).toBeInTheDocument();
+    expect(screen.getByText('材料覆盖率')).toBeInTheDocument();
+    expect(screen.getByText('60%')).toBeInTheDocument();
+    expect(screen.getByText('受影响员工')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '查看员工台账' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '生成体检报告' })).toBeInTheDocument();
     expect(screen.queryByText('无风险')).not.toBeInTheDocument();
+  });
+
+  it('labels partial analyses honestly instead of always claiming completion', () => {
+    render(
+      <DashboardView
+        summary={{
+          analysis_id: 'analysis-partial',
+          status: 'partial',
+          employee_count: 1,
+          finding_count: 0,
+          high_count: 0,
+          medium_count: 0,
+          insufficient_data_count: 0,
+        }}
+        findings={[]}
+        onSelectFinding={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('部分完成')).toBeInTheDocument();
+    expect(screen.queryByText('分析完成')).not.toBeInTheDocument();
   });
 
   it('shows traceable source file and locator in finding detail', () => {

@@ -37,15 +37,15 @@ def test_rc_workflow_has_exact_platform_and_manifest_jobs() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     job_names = re.findall(r"(?m)^  ([A-Za-z_][A-Za-z0-9_-]*):\n", workflow.split("jobs:\n", 1)[1])
 
-    assert job_names == ["macos-arm64-rc", "windows-x64-rc", "rc-manifest"]
+    assert job_names == ["macos-arm64-rc", "rc-manifest"]
     assert "runs-on: macos-15" in _job_block(workflow, "macos-arm64-rc")
-    assert "runs-on: windows-latest" in _job_block(workflow, "windows-x64-rc")
-    assert "needs:\n      - macos-arm64-rc\n      - windows-x64-rc" in _job_block(workflow, "rc-manifest")
+    assert "runs-on: windows-latest" not in workflow
+    assert "needs:\n      - macos-arm64-rc" in _job_block(workflow, "rc-manifest")
 
 
 def test_rc_platform_jobs_pin_tools_and_execute_real_acceptance() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
-    for name in ("macos-arm64-rc", "windows-x64-rc"):
+    for name in ("macos-arm64-rc",):
         block = _job_block(workflow, name)
         assert 'CI: "true"' in block
         assert "--remap-path-prefix=" in block
@@ -78,20 +78,8 @@ def test_rc_platform_jobs_pin_tools_and_execute_real_acceptance() -> None:
     assert "-C link-arg=-Wl,-x" in macos
     assert "--bundles app,dmg --ci -- --locked" in macos
     assert "--bundles app,dmg --no-sign" not in macos
-    windows = _job_block(workflow, "windows-x64-rc")
-    assert "-C strip=symbols" in windows
-    assert "--bundles nsis --no-sign --ci -- --locked" in windows
-    assert '"/S"' in windows and '"/D=' in windows
-    assert "QIAN_INSTALLED_SIDECAR" in windows
-    assert "Get-FileHash" in windows
-    assert "INSTALLED_SIDECAR_HASH_MISMATCH" in windows
-    assert (
-        'verify_built_sidecar.py --binary "$env:QIAN_INSTALLED_SIDECAR"' in windows
-    )
-    assert "--cwd-binary-dir" in windows
-    assert "--windows-no-window" in windows
     assert "--abnormal-lifecycle" in macos
-    assert "--abnormal-lifecycle" in windows
+    assert "--bundles nsis" not in workflow
 
 
 def test_macos_rc_pins_xcode_26_2_sdk() -> None:
@@ -114,7 +102,7 @@ def test_rc_manifest_job_downloads_and_reverifies_platform_artifacts() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     block = _job_block(workflow, "rc-manifest")
 
-    assert block.count("actions/download-artifact@v4") == 2
+    assert block.count("actions/download-artifact@v4") == 1
     assert "python scripts/rc_manifest.py combine" in block
     assert "python scripts/rc_manifest.py verify" in block
     assert "actions/upload-artifact@v4" in block
@@ -122,7 +110,6 @@ def test_rc_manifest_job_downloads_and_reverifies_platform_artifacts() -> None:
     for filename in (
         "qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.app.tar.gz",
         "qian-labor-desktop-0.1.0-rc.1-macos-arm64-unsigned.dmg",
-        "qian-labor-desktop-0.1.0-rc.1-windows-x64-unsigned-nsis.exe",
         "BUILD-MANIFEST.json",
         "SHA256SUMS.txt",
     ):
