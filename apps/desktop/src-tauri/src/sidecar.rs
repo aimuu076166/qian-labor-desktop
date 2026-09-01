@@ -18,6 +18,7 @@ const LOOPBACK_HOST: &str = "127.0.0.1";
 const SMOKE_FLAG: &str = "QIAN_RC_SMOKE";
 const SMOKE_ROOT: &str = "QIAN_RC_SMOKE_DIR";
 const SMOKE_PREFIX: &str = "qian-rc-smoke-";
+const SIDECAR_READY_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SidecarReady {
@@ -399,7 +400,7 @@ pub async fn start_backend(app: AppHandle) -> Result<BackendProcess> {
     .map_err(anyhow::Error::msg)
     .context("DESKTOP_SIDECAR_SPAWN_FAILED")?;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + SIDECAR_READY_TIMEOUT;
     let ready = loop {
         match read_ready_file(&ready_file) {
             Ok(Some(payload)) => match parse_ready_payload(&payload) {
@@ -628,6 +629,11 @@ mod tests {
         assert_eq!(second.len(), 64);
         assert!(first.chars().all(|value| value.is_ascii_hexdigit()));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn cold_packaged_sidecar_gets_a_realistic_ready_budget() {
+        assert!(SIDECAR_READY_TIMEOUT >= Duration::from_secs(45));
     }
 
     #[test]

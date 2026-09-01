@@ -197,7 +197,7 @@ def smoke_packaged_app(binary: Path) -> None:
                 **_popen_options(),
             )
             try:
-                return_code = process.wait(timeout=60)
+                return_code = process.wait(timeout=90)
             except subprocess.TimeoutExpired as error:
                 raise PackagedSmokeError("APP_EXIT_TIMEOUT") from error
             if return_code != 0:

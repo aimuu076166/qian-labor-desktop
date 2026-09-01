@@ -531,6 +531,34 @@ def test_packaged_smoke_started_evidence_contains_only_diagnostic_pid() -> None:
         )
 
 
+def test_packaged_smoke_wait_budget_covers_cold_sidecar_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    smoke = _load("smoke_packaged_app")
+    binary = tmp_path / "qian-labor-desktop"
+    binary.write_bytes(b"binary")
+    binary.chmod(0o755)
+    waited: list[float] = []
+
+    class SlowProcess:
+        pid = 999_999_999
+
+        def wait(self, timeout: float) -> int:
+            waited.append(timeout)
+            raise smoke.subprocess.TimeoutExpired([str(binary)], timeout)
+
+        def poll(self) -> int:
+            return 0
+
+    monkeypatch.setattr(smoke.subprocess, "Popen", lambda *_args, **_kwargs: SlowProcess())
+
+    with pytest.raises(smoke.PackagedSmokeError) as captured:
+        smoke.smoke_packaged_app(binary)
+
+    assert captured.value.code == "APP_EXIT_TIMEOUT"
+    assert waited == [90]
+
+
 def test_packaged_smoke_retries_transient_windows_data_directory_locks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
