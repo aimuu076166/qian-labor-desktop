@@ -183,6 +183,6 @@ def test_desktop_runtime_uses_configured_zhipu_provider_and_call_limit(tmp_path:
     pipeline = app.state.processing_queue.pipeline_factory()
 
     assert isinstance(pipeline.provider, ZhipuChatCompletionsProvider)
-    assert pipeline.provider.text_model == "glm-5.2"
-    assert pipeline.provider.vision_model == "glm-4.6v"
+    assert pipeline.provider.text_model == "glm-5.3-flash"
+    assert pipeline.provider.vision_model == "glm-5.3-flash"
     assert pipeline.max_provider_calls == 7

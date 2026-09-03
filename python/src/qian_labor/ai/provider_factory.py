@@ -12,8 +12,7 @@ from qian_labor.settings import Settings
 
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
-ZHIPU_DEFAULT_TEXT_MODEL = "glm-5.2"
-ZHIPU_DEFAULT_VISION_MODEL = "glm-4.6v"
+ZHIPU_DEFAULT_MODEL = "glm-5.3-flash"
 
 
 def _external_privacy_boundary(settings: Settings) -> PrivacyBoundary:
@@ -43,8 +42,8 @@ def provider_from_settings(settings: Settings) -> AIProvider:
             if configured_base in {"", OPENAI_BASE_URL}
             else configured_base
         )
-        text_model = settings.ai_text_model.strip() or ZHIPU_DEFAULT_TEXT_MODEL
-        vision_model = settings.ai_vision_model.strip() or ZHIPU_DEFAULT_VISION_MODEL
+        text_model = settings.ai_text_model.strip() or ZHIPU_DEFAULT_MODEL
+        vision_model = settings.ai_vision_model.strip() or ZHIPU_DEFAULT_MODEL
         return ZhipuChatCompletionsProvider(
             settings.ai_api_key,
             base_url,

@@ -12,6 +12,7 @@ const API_KEY_ACCOUNT: &str = "zhipu-api-key";
 const PII_PEPPER_ACCOUNT: &str = "pii-hash-pepper";
 const CONFIG_FILE: &str = "provider-config.json";
 const ZHIPU_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
+const ZHIPU_MODEL: &str = "glm-5.3-flash";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,8 +92,8 @@ pub fn configure_provider<S: SecretStore>(
     let vision_model = input.vision_model.trim();
     let base_url = input.base_url.trim().trim_end_matches('/');
     if !(8..=4096).contains(&api_key.len())
-        || !valid_model(text_model)
-        || !valid_model(vision_model)
+        || text_model != ZHIPU_MODEL
+        || vision_model != ZHIPU_MODEL
         || base_url != ZHIPU_BASE_URL
     {
         return Err("DESKTOP_PROVIDER_CONFIGURATION_INVALID".to_string());
@@ -136,13 +137,14 @@ pub fn provider_status<S: SecretStore>(
         .get(PII_PEPPER_ACCOUNT)?
         .is_some_and(|value| value.len() >= 32);
     let configured = config.provider == "zhipu" && key_present && pepper_present;
+    let current_configuration = is_current_configuration(&config);
     Ok(ProviderConfigurationStatus {
         provider: "zhipu".to_string(),
         configured,
-        validated: configured && config.validated,
-        text_model: config.text_model,
-        vision_model: config.vision_model,
-        base_url: config.base_url,
+        validated: configured && current_configuration && config.validated,
+        text_model: ZHIPU_MODEL.to_string(),
+        vision_model: ZHIPU_MODEL.to_string(),
+        base_url: ZHIPU_BASE_URL.to_string(),
     })
 }
 
@@ -169,7 +171,7 @@ pub fn provider_environment<S: SecretStore>(
     let key = String::from_utf8(key).map_err(|_| "DESKTOP_CREDENTIAL_READ_FAILED".to_string())?;
     let pepper =
         String::from_utf8(pepper).map_err(|_| "DESKTOP_CREDENTIAL_READ_FAILED".to_string())?;
-    if key.is_empty() || pepper.len() < 32 || config.provider != "zhipu" {
+    if key.is_empty() || pepper.len() < 32 || !is_current_configuration(&config) {
         return Ok(Vec::new());
     }
     Ok(vec![
@@ -177,25 +179,25 @@ pub fn provider_environment<S: SecretStore>(
         (OsString::from("AI_API_KEY"), OsString::from(key)),
         (
             OsString::from("AI_BASE_URL"),
-            OsString::from(config.base_url),
+            OsString::from(ZHIPU_BASE_URL),
         ),
         (
             OsString::from("AI_TEXT_MODEL"),
-            OsString::from(config.text_model),
+            OsString::from(ZHIPU_MODEL),
         ),
         (
             OsString::from("AI_VISION_MODEL"),
-            OsString::from(config.vision_model),
+            OsString::from(ZHIPU_MODEL),
         ),
         (OsString::from("PII_HASH_PEPPER"), OsString::from(pepper)),
     ])
 }
 
-fn valid_model(value: &str) -> bool {
-    (1..=120).contains(&value.len())
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+fn is_current_configuration(config: &ProviderConfigurationFile) -> bool {
+    config.provider == "zhipu"
+        && config.text_model == ZHIPU_MODEL
+        && config.vision_model == ZHIPU_MODEL
+        && config.base_url.trim_end_matches('/') == ZHIPU_BASE_URL
 }
 
 fn random_secret() -> String {
@@ -252,8 +254,8 @@ fn unconfigured_status() -> ProviderConfigurationStatus {
         provider: "zhipu".to_string(),
         configured: false,
         validated: false,
-        text_model: String::new(),
-        vision_model: String::new(),
+        text_model: ZHIPU_MODEL.to_string(),
+        vision_model: ZHIPU_MODEL.to_string(),
         base_url: ZHIPU_BASE_URL.to_string(),
     }
 }
@@ -335,8 +337,8 @@ mod tests {
     fn input() -> ProviderConfigurationInput {
         ProviderConfigurationInput {
             api_key: "synthetic-test-key-value".to_string(),
-            text_model: "glm-synthetic-text".to_string(),
-            vision_model: "glm-synthetic-vision".to_string(),
+            text_model: "glm-5.3-flash".to_string(),
+            vision_model: "glm-5.3-flash".to_string(),
             base_url: ZHIPU_BASE_URL.to_string(),
         }
     }
@@ -379,7 +381,11 @@ mod tests {
         );
         assert_eq!(
             values.get(&OsString::from("AI_TEXT_MODEL")).unwrap(),
-            "glm-synthetic-text"
+            "glm-5.3-flash"
+        );
+        assert_eq!(
+            values.get(&OsString::from("AI_VISION_MODEL")).unwrap(),
+            "glm-5.3-flash"
         );
         assert!(
             values
@@ -420,6 +426,60 @@ mod tests {
         assert_eq!(error, "DESKTOP_PROVIDER_CONFIGURATION_INVALID");
         assert!(store.get(API_KEY_ACCOUNT).unwrap().is_none());
         assert!(!directory.join(CONFIG_FILE).exists());
+        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn noncanonical_model_is_rejected_before_any_secret_is_written() {
+        let directory = temporary_directory("noncanonical-model");
+        std::fs::create_dir_all(&directory).expect("create temporary directory");
+        let store = MemorySecretStore::default();
+        let mut invalid = input();
+        invalid.vision_model = "glm-4.6v".to_string();
+
+        let error = configure_provider(&store, &directory, invalid).unwrap_err();
+
+        assert_eq!(error, "DESKTOP_PROVIDER_CONFIGURATION_INVALID");
+        assert!(store.get(API_KEY_ACCOUNT).unwrap().is_none());
+        assert!(!directory.join(CONFIG_FILE).exists());
+        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn legacy_model_configuration_requires_revalidation() {
+        let directory = temporary_directory("legacy-model");
+        std::fs::create_dir_all(&directory).expect("create temporary directory");
+        let store = MemorySecretStore::default();
+        store
+            .set(API_KEY_ACCOUNT, b"synthetic-test-key-value")
+            .expect("store key");
+        store
+            .set(
+                PII_PEPPER_ACCOUNT,
+                b"0123456789abcdef0123456789abcdef",
+            )
+            .expect("store pepper");
+        write_configuration(
+            &directory,
+            &ProviderConfigurationFile {
+                provider: "zhipu".to_string(),
+                text_model: "glm-5.2".to_string(),
+                vision_model: "glm-4.6v".to_string(),
+                base_url: ZHIPU_BASE_URL.to_string(),
+                validated: true,
+            },
+        )
+        .expect("write legacy config");
+
+        let status = provider_status(&store, &directory).expect("provider status");
+
+        assert!(status.configured);
+        assert!(!status.validated);
+        assert_eq!(status.text_model, "glm-5.3-flash");
+        assert_eq!(status.vision_model, "glm-5.3-flash");
+        assert!(provider_environment(&store, &directory)
+            .expect("provider environment")
+            .is_empty());
         std::fs::remove_dir_all(directory).expect("remove temporary directory");
     }
 }

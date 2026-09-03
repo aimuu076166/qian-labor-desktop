@@ -214,7 +214,7 @@ def test_zhipu_provider_retries_rate_limit_without_leaking_response_body() -> No
     assert result.usage.attempts == 2
 
 
-def test_provider_factory_defaults_zhipu_to_current_configurable_models_and_official_base() -> None:
+def test_provider_factory_defaults_zhipu_to_glm_5_3_flash_and_official_base() -> None:
     settings = Settings(
         app_secret="separate-app-secret",
         pii_hash_pepper=PEPPER,
@@ -228,8 +228,8 @@ def test_provider_factory_defaults_zhipu_to_current_configurable_models_and_offi
 
     assert isinstance(provider, ZhipuChatCompletionsProvider)
     assert provider.base_url == "https://open.bigmodel.cn/api/paas/v4"
-    assert provider.text_model == "glm-5.2"
-    assert provider.vision_model == "glm-4.6v"
+    assert provider.text_model == "glm-5.3-flash"
+    assert provider.vision_model == "glm-5.3-flash"
 
 
 def test_provider_factory_keeps_openai_official_default_when_base_url_is_blank() -> None:

@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useRef, useState } from 'react';
+import { type FormEvent, useRef } from 'react';
 
 export type ProviderConfigurationStatus = {
   provider: string;
@@ -23,8 +23,7 @@ type SettingsViewProps = {
   onSave: (input: ProviderConfigurationInput) => Promise<void>;
 };
 
-const DEFAULT_TEXT_MODEL = 'glm-5.2';
-const DEFAULT_VISION_MODEL = 'glm-4.6v';
+const ZHIPU_MODEL = 'glm-5.3-flash';
 
 export function SettingsView({
   status,
@@ -33,13 +32,6 @@ export function SettingsView({
   onSave,
 }: SettingsViewProps) {
   const keyRef = useRef<HTMLInputElement>(null);
-  const [textModel, setTextModel] = useState(status.textModel || DEFAULT_TEXT_MODEL);
-  const [visionModel, setVisionModel] = useState(status.visionModel || DEFAULT_VISION_MODEL);
-
-  useEffect(() => {
-    setTextModel(status.textModel || DEFAULT_TEXT_MODEL);
-    setVisionModel(status.visionModel || DEFAULT_VISION_MODEL);
-  }, [status.textModel, status.visionModel]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -47,8 +39,8 @@ export function SettingsView({
     try {
       await onSave({
         apiKey,
-        textModel: textModel.trim(),
-        visionModel: visionModel.trim(),
+        textModel: ZHIPU_MODEL,
+        visionModel: ZHIPU_MODEL,
         baseUrl: status.baseUrl,
       });
     } finally {
@@ -91,22 +83,11 @@ export function SettingsView({
           placeholder={status.configured ? '重新输入以更新 Key' : '请输入你自己的智谱 API Key'}
         />
 
-        <label htmlFor="zhipu-text-model">文本模型</label>
+        <label htmlFor="zhipu-model">分析模型</label>
         <input
-          id="zhipu-text-model"
-          value={textModel}
-          required
-          maxLength={120}
-          onChange={(event) => setTextModel(event.target.value)}
-        />
-
-        <label htmlFor="zhipu-vision-model">视觉模型</label>
-        <input
-          id="zhipu-vision-model"
-          value={visionModel}
-          required
-          maxLength={120}
-          onChange={(event) => setVisionModel(event.target.value)}
+          id="zhipu-model"
+          value={ZHIPU_MODEL}
+          readOnly
         />
 
         <label htmlFor="zhipu-base-url">服务地址</label>

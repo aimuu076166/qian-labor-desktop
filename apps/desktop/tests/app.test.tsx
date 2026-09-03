@@ -16,8 +16,8 @@ const validatedConfiguration = {
   provider: 'zhipu',
   configured: true,
   validated: true,
-  textModel: 'glm-synthetic-text',
-  visionModel: 'glm-synthetic-vision',
+  textModel: 'glm-5.3-flash',
+  visionModel: 'glm-5.3-flash',
   baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
 };
 

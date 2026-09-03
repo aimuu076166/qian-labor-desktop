@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { SettingsView } from '../src/features/settings/SettingsView';
 
 describe('SettingsView', () => {
-  it('submits a write-only Zhipu key with explicit model configuration', async () => {
+  it('submits a write-only Zhipu key with the fixed multimodal model', async () => {
     const onSave = vi.fn(async () => undefined);
     render(
       <SettingsView
@@ -22,20 +22,18 @@ describe('SettingsView', () => {
     const key = screen.getByLabelText('智谱 API Key');
     expect(key).toHaveAttribute('type', 'password');
     expect(key).toHaveValue('');
+    expect(screen.getByLabelText('分析模型')).toHaveValue('glm-5.3-flash');
+    expect(screen.getByLabelText('分析模型')).toHaveAttribute('readonly');
+    expect(screen.queryByLabelText('文本模型')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('视觉模型')).not.toBeInTheDocument();
     fireEvent.change(key, { target: { value: 'synthetic-ui-key-value' } });
-    fireEvent.change(screen.getByLabelText('文本模型'), {
-      target: { value: 'glm-synthetic-text' },
-    });
-    fireEvent.change(screen.getByLabelText('视觉模型'), {
-      target: { value: 'glm-synthetic-vision' },
-    });
     fireEvent.click(screen.getByRole('button', { name: '保存并测试连接' }));
 
     await waitFor(() =>
       expect(onSave).toHaveBeenCalledWith({
         apiKey: 'synthetic-ui-key-value',
-        textModel: 'glm-synthetic-text',
-        visionModel: 'glm-synthetic-vision',
+        textModel: 'glm-5.3-flash',
+        visionModel: 'glm-5.3-flash',
         baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
       }),
     );
@@ -49,8 +47,8 @@ describe('SettingsView', () => {
           provider: 'zhipu',
           configured: true,
           validated: false,
-          textModel: 'glm-5.2',
-          visionModel: 'glm-4.6v',
+          textModel: 'glm-5.3-flash',
+          visionModel: 'glm-5.3-flash',
           baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
         }}
         errorCode="AI_PROVIDER_ERROR"
