@@ -181,10 +181,7 @@ pub fn provider_environment<S: SecretStore>(
             OsString::from("AI_BASE_URL"),
             OsString::from(ZHIPU_BASE_URL),
         ),
-        (
-            OsString::from("AI_TEXT_MODEL"),
-            OsString::from(ZHIPU_MODEL),
-        ),
+        (OsString::from("AI_TEXT_MODEL"), OsString::from(ZHIPU_MODEL)),
         (
             OsString::from("AI_VISION_MODEL"),
             OsString::from(ZHIPU_MODEL),
@@ -454,10 +451,7 @@ mod tests {
             .set(API_KEY_ACCOUNT, b"synthetic-test-key-value")
             .expect("store key");
         store
-            .set(
-                PII_PEPPER_ACCOUNT,
-                b"0123456789abcdef0123456789abcdef",
-            )
+            .set(PII_PEPPER_ACCOUNT, b"0123456789abcdef0123456789abcdef")
             .expect("store pepper");
         write_configuration(
             &directory,
