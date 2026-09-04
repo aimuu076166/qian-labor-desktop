@@ -238,7 +238,8 @@ h2 { letter-spacing: -.02em; }
   align-items: center;
 }
 .settings-form label { color: #536176; font-size: 13px; font-weight: 700; }
-.settings-form input {
+.settings-form input,
+.settings-form select {
   min-height: 44px;
   padding: 9px 11px;
   border: 1px solid #cfd7e1;

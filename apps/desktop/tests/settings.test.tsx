@@ -24,6 +24,9 @@ describe('SettingsView', () => {
     expect(key).toHaveValue('');
     expect(screen.getByLabelText('分析模型')).toHaveValue('glm-5.3-flash');
     expect(screen.getByLabelText('分析模型')).toHaveAttribute('readonly');
+    expect(screen.getByLabelText('计费通道')).toHaveValue(
+      'https://open.bigmodel.cn/api/paas/v4',
+    );
     expect(screen.queryByLabelText('文本模型')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('视觉模型')).not.toBeInTheDocument();
     expect(
@@ -42,6 +45,40 @@ describe('SettingsView', () => {
       }),
     );
     await waitFor(() => expect(key).toHaveValue(''));
+  });
+
+  it('submits the official Coding Plan endpoint when that billing channel is selected', async () => {
+    const onSave = vi.fn(async () => undefined);
+    render(
+      <SettingsView
+        status={{
+          provider: 'zhipu',
+          configured: false,
+          validated: false,
+          textModel: 'glm-5.3-flash',
+          visionModel: 'glm-5.3-flash',
+          baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+        }}
+        onSave={onSave}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText('计费通道'), {
+      target: { value: 'https://open.bigmodel.cn/api/coding/paas/v4' },
+    });
+    fireEvent.change(screen.getByLabelText('智谱 API Key'), {
+      target: { value: 'synthetic-coding-plan-key' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '保存并测试连接' }));
+
+    await waitFor(() =>
+      expect(onSave).toHaveBeenCalledWith({
+        apiKey: 'synthetic-coding-plan-key',
+        textModel: 'glm-5.3-flash',
+        visionModel: 'glm-5.3-flash',
+        baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4',
+      }),
+    );
   });
 
   it('shows a stable connection error without ever echoing the key', () => {
@@ -80,7 +117,7 @@ describe('SettingsView', () => {
       />,
     );
 
-    expect(screen.getByRole('alert')).toHaveTextContent('智谱账户欠费');
+    expect(screen.getByRole('alert')).toHaveTextContent('当前 Key 在所选接口没有可用额度');
     expect(screen.getByRole('alert')).toHaveTextContent('AI_ACCOUNT_ARREARS');
     expect(screen.queryByText(/never expose this body/)).not.toBeInTheDocument();
   });

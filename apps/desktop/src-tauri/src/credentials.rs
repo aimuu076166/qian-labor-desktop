@@ -15,6 +15,7 @@ const PII_PEPPER_FILE: &str = "pii-hash-pepper.secret";
 const MAX_SECRET_BYTES: u64 = 4096;
 const CONFIG_FILE: &str = "provider-config.json";
 const ZHIPU_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
+const ZHIPU_CODING_PLAN_BASE_URL: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
 const ZHIPU_MODEL: &str = "glm-5.3-flash";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -175,7 +176,7 @@ pub fn configure_provider<S: SecretStore>(
     if !(8..=4096).contains(&api_key.len())
         || text_model != ZHIPU_MODEL
         || vision_model != ZHIPU_MODEL
-        || base_url != ZHIPU_BASE_URL
+        || !is_allowed_base_url(base_url)
     {
         return Err("DESKTOP_PROVIDER_CONFIGURATION_INVALID".to_string());
     }
@@ -219,13 +220,18 @@ pub fn provider_status<S: SecretStore>(
         .is_some_and(|value| value.len() >= 32);
     let configured = config.provider == "zhipu" && key_present && pepper_present;
     let current_configuration = is_current_configuration(&config);
+    let base_url = if is_allowed_base_url(config.base_url.trim_end_matches('/')) {
+        config.base_url.trim_end_matches('/').to_string()
+    } else {
+        ZHIPU_BASE_URL.to_string()
+    };
     Ok(ProviderConfigurationStatus {
         provider: "zhipu".to_string(),
         configured,
         validated: configured && current_configuration && config.validated,
         text_model: ZHIPU_MODEL.to_string(),
         vision_model: ZHIPU_MODEL.to_string(),
-        base_url: ZHIPU_BASE_URL.to_string(),
+        base_url,
     })
 }
 
@@ -260,7 +266,7 @@ pub fn provider_environment<S: SecretStore>(
         (OsString::from("AI_API_KEY"), OsString::from(key)),
         (
             OsString::from("AI_BASE_URL"),
-            OsString::from(ZHIPU_BASE_URL),
+            OsString::from(config.base_url.trim_end_matches('/')),
         ),
         (OsString::from("AI_TEXT_MODEL"), OsString::from(ZHIPU_MODEL)),
         (
@@ -275,7 +281,11 @@ fn is_current_configuration(config: &ProviderConfigurationFile) -> bool {
     config.provider == "zhipu"
         && config.text_model == ZHIPU_MODEL
         && config.vision_model == ZHIPU_MODEL
-        && config.base_url.trim_end_matches('/') == ZHIPU_BASE_URL
+        && is_allowed_base_url(config.base_url.trim_end_matches('/'))
+}
+
+fn is_allowed_base_url(base_url: &str) -> bool {
+    base_url == ZHIPU_BASE_URL || base_url == ZHIPU_CODING_PLAN_BASE_URL
 }
 
 fn random_secret() -> String {
@@ -519,6 +529,46 @@ mod tests {
                 .len()
                 >= 32
         );
+        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn coding_plan_configuration_uses_the_selected_official_endpoint() {
+        let directory = temporary_directory("coding-plan-endpoint");
+        std::fs::create_dir_all(&directory).expect("create temporary directory");
+        let store = MemorySecretStore::default();
+        let mut coding_plan = input();
+        coding_plan.base_url = "https://open.bigmodel.cn/api/coding/paas/v4".to_string();
+
+        let status = configure_provider(&store, &directory, coding_plan)
+            .expect("configure Coding Plan provider");
+        let environment = provider_environment(&store, &directory).expect("provider environment");
+        let values: HashMap<_, _> = environment.into_iter().collect();
+
+        assert_eq!(
+            status.base_url,
+            "https://open.bigmodel.cn/api/coding/paas/v4"
+        );
+        assert_eq!(
+            values.get(&OsString::from("AI_BASE_URL")).unwrap(),
+            "https://open.bigmodel.cn/api/coding/paas/v4"
+        );
+        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn arbitrary_provider_endpoint_is_rejected_before_any_secret_is_written() {
+        let directory = temporary_directory("arbitrary-endpoint");
+        std::fs::create_dir_all(&directory).expect("create temporary directory");
+        let store = MemorySecretStore::default();
+        let mut invalid = input();
+        invalid.base_url = "https://example.invalid/api/v4".to_string();
+
+        let error = configure_provider(&store, &directory, invalid).unwrap_err();
+
+        assert_eq!(error, "DESKTOP_PROVIDER_CONFIGURATION_INVALID");
+        assert!(store.get(API_KEY_ACCOUNT).unwrap().is_none());
+        assert!(!directory.join(CONFIG_FILE).exists());
         std::fs::remove_dir_all(directory).expect("remove temporary directory");
     }
 

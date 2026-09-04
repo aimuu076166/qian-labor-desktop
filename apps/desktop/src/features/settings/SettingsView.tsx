@@ -1,4 +1,4 @@
-import { type FormEvent, useRef } from 'react';
+import { type FormEvent, useRef, useState } from 'react';
 
 export type ProviderConfigurationStatus = {
   provider: string;
@@ -24,9 +24,12 @@ type SettingsViewProps = {
 };
 
 const ZHIPU_MODEL = 'glm-5.3-flash';
+const ZHIPU_STANDARD_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
+const ZHIPU_CODING_PLAN_BASE_URL = 'https://open.bigmodel.cn/api/coding/paas/v4';
 
 const PROVIDER_ERROR_MESSAGES: Record<string, string> = {
-  AI_ACCOUNT_ARREARS: '智谱账户欠费，请充值后重试。',
+  AI_ACCOUNT_ARREARS:
+    '当前 Key 在所选接口没有可用额度。Coding Plan 用户请选择 Coding Plan 通道。',
   AI_RATE_LIMIT: '请求过于频繁，请等待一分钟后重试。',
   AI_PROVIDER_OVERLOADED: '智谱模型当前访问量过大，请稍后重试。',
   AI_QUOTA_EXCEEDED: '智谱额度已用完，请检查账户额度或等待重置。',
@@ -41,6 +44,7 @@ export function SettingsView({
   onSave,
 }: SettingsViewProps) {
   const keyRef = useRef<HTMLInputElement>(null);
+  const [baseUrl, setBaseUrl] = useState(status.baseUrl);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -50,7 +54,7 @@ export function SettingsView({
         apiKey,
         textModel: ZHIPU_MODEL,
         visionModel: ZHIPU_MODEL,
-        baseUrl: status.baseUrl,
+        baseUrl,
       });
     } finally {
       if (keyRef.current) keyRef.current.value = '';
@@ -99,8 +103,19 @@ export function SettingsView({
           readOnly
         />
 
-        <label htmlFor="zhipu-base-url">服务地址</label>
-        <input id="zhipu-base-url" value={status.baseUrl} readOnly />
+        <label htmlFor="zhipu-base-url">计费通道</label>
+        <select
+          id="zhipu-base-url"
+          value={baseUrl}
+          onChange={(event) => setBaseUrl(event.target.value)}
+        >
+          <option value={ZHIPU_STANDARD_BASE_URL}>
+            标准 API — {ZHIPU_STANDARD_BASE_URL}
+          </option>
+          <option value={ZHIPU_CODING_PLAN_BASE_URL}>
+            Coding Plan — {ZHIPU_CODING_PLAN_BASE_URL}
+          </option>
+        </select>
 
         <button type="submit" className="primary-action" disabled={saving}>
           {saving ? '正在安全保存并测试…' : '保存并测试连接'}

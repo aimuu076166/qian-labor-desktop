@@ -72,7 +72,7 @@ AI_VISION_MODEL
 PII_HASH_PEPPER
 ```
 
-桌面设置当前固定使用智谱原生多模态模型 [`glm-5.3-flash`](https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash)，文本材料和图片材料统一使用该型号。设置页不允许改写模型编码；升级前保存的其他型号必须使用用户自己的 Key 重新保存并通过连接测试后，才可继续真实分析。
+桌面设置当前固定使用智谱原生多模态模型 [`glm-5.3-flash`](https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash)，文本材料和图片材料统一使用该型号。设置页不允许改写模型编码，但可在智谱官方的“标准 API”与“Coding Plan”两个计费通道之间选择；应用只接受对应的两个官方 HTTPS 地址，不允许把 API Key 发送到任意自定义地址。升级前保存的其他型号必须使用用户自己的 Key 重新保存并通过连接测试后，才可继续真实分析。
 
 ## API Key 安全
 
