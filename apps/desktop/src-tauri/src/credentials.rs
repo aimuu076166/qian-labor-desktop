@@ -116,9 +116,9 @@ impl SecretStore for LocalSecretStore {
         let destination = self
             .secret_path(account)
             .map_err(|_| "DESKTOP_CREDENTIAL_WRITE_FAILED".to_string())?;
-        if std::fs::symlink_metadata(&destination).is_ok_and(|metadata| {
-            metadata.file_type().is_symlink() || !metadata.is_file()
-        }) {
+        if std::fs::symlink_metadata(&destination)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file())
+        {
             return Err("DESKTOP_CREDENTIAL_WRITE_FAILED".to_string());
         }
         let temporary = self.data_dir.join(format!(
