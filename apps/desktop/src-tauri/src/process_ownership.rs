@@ -151,7 +151,6 @@ impl PlatformOwnedProcess {
         command
             .args(&spec.args)
             .current_dir(spec.current_dir)
-            .envs(spec.env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -159,6 +158,7 @@ impl PlatformOwnedProcess {
         for key in spec.removed_env {
             command.env_remove(key);
         }
+        command.envs(spec.env.iter().map(|(key, value)| (key, value)));
 
         let sidecar = match command.spawn() {
             Ok(child) => child,
