@@ -582,6 +582,48 @@ mod tests {
     }
 
     #[test]
+    fn spawned_sidecar_receives_explicit_provider_session_secrets() {
+        let temp = temporary_directory("provider-environment");
+        std::fs::create_dir_all(&temp).expect("create provider environment test directory");
+        let captured_environment = temp.join("provider-environment.txt");
+        let script = format!(
+            "printf '%s' \"$AI_PROVIDER:$AI_API_KEY\" > '{}'",
+            captured_environment.display()
+        );
+        let spec = SpawnSpec {
+            executable: Path::new("/bin/sh"),
+            current_dir: &temp,
+            args: vec![OsString::from("-c"), OsString::from(script)],
+            env: vec![
+                (OsString::from("AI_PROVIDER"), OsString::from("zhipu")),
+                (
+                    OsString::from("AI_API_KEY"),
+                    OsString::from("synthetic-session-key"),
+                ),
+            ],
+            removed_env: PROVIDER_KEYS,
+        };
+
+        let mut owned = PlatformOwnedProcess::spawn(&spec).expect("spawn provider probe");
+        assert!(
+            owned
+                .wait_for_sidecar_exit(Duration::from_secs(5))
+                .expect("wait for provider probe"),
+            "provider probe did not exit"
+        );
+        owned
+            .finalize_after_graceful()
+            .expect("clean provider probe process group");
+
+        assert_eq!(
+            std::fs::read_to_string(&captured_environment)
+                .expect("read captured provider environment"),
+            "zhipu:synthetic-session-key"
+        );
+        std::fs::remove_dir_all(temp).expect("remove provider environment test directory");
+    }
+
+    #[test]
     fn owned_group_cleanup_does_not_target_unrelated_process() {
         let temp = temporary_directory("cleanup");
         std::fs::create_dir_all(&temp).expect("create process ownership test directory");
