@@ -1,5 +1,6 @@
 use std::ffi::OsString;
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -7,9 +8,11 @@ use tauri::{AppHandle, Manager};
 
 use crate::sidecar::{start_backend, BackendState};
 
-const KEYCHAIN_SERVICE: &str = "cn.qianlabor.desktop";
 const API_KEY_ACCOUNT: &str = "zhipu-api-key";
 const PII_PEPPER_ACCOUNT: &str = "pii-hash-pepper";
+const API_KEY_FILE: &str = "zhipu-api-key.secret";
+const PII_PEPPER_FILE: &str = "pii-hash-pepper.secret";
+const MAX_SECRET_BYTES: u64 = 4096;
 const CONFIG_FILE: &str = "provider-config.json";
 const ZHIPU_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
 const ZHIPU_MODEL: &str = "glm-5.3-flash";
@@ -48,37 +51,115 @@ pub trait SecretStore {
     fn set(&self, account: &str, value: &[u8]) -> Result<(), String>;
 }
 
-pub struct SystemSecretStore;
+pub struct LocalSecretStore {
+    data_dir: PathBuf,
+}
 
-#[cfg(target_os = "macos")]
-impl SecretStore for SystemSecretStore {
-    fn get(&self, account: &str) -> Result<Option<Vec<u8>>, String> {
-        use security_framework::passwords::{generic_password, PasswordOptions};
-
-        match generic_password(PasswordOptions::new_generic_password(
-            KEYCHAIN_SERVICE,
-            account,
-        )) {
-            Ok(value) => Ok(Some(value)),
-            Err(error) if error.code() == -25300 => Ok(None),
-            Err(_) => Err("DESKTOP_CREDENTIAL_READ_FAILED".to_string()),
+impl LocalSecretStore {
+    pub fn new(data_dir: &Path) -> Self {
+        Self {
+            data_dir: data_dir.to_path_buf(),
         }
     }
 
-    fn set(&self, account: &str, value: &[u8]) -> Result<(), String> {
-        security_framework::passwords::set_generic_password(KEYCHAIN_SERVICE, account, value)
-            .map_err(|_| "DESKTOP_CREDENTIAL_WRITE_FAILED".to_string())
+    fn secret_path(&self, account: &str) -> Result<PathBuf, String> {
+        let filename = match account {
+            API_KEY_ACCOUNT => API_KEY_FILE,
+            PII_PEPPER_ACCOUNT => PII_PEPPER_FILE,
+            _ => return Err("DESKTOP_CREDENTIAL_ACCOUNT_INVALID".to_string()),
+        };
+        Ok(self.data_dir.join(filename))
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-impl SecretStore for SystemSecretStore {
-    fn get(&self, _account: &str) -> Result<Option<Vec<u8>>, String> {
-        Ok(None)
+impl SecretStore for LocalSecretStore {
+    fn get(&self, account: &str) -> Result<Option<Vec<u8>>, String> {
+        let path = self
+            .secret_path(account)
+            .map_err(|_| "DESKTOP_CREDENTIAL_READ_FAILED".to_string())?;
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("DESKTOP_CREDENTIAL_READ_FAILED".to_string()),
+        };
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() > MAX_SECRET_BYTES
+        {
+            return Err("DESKTOP_CREDENTIAL_READ_FAILED".to_string());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            if metadata.permissions().mode() & 0o077 != 0 {
+                return Err("DESKTOP_CREDENTIAL_READ_FAILED".to_string());
+            }
+        }
+        std::fs::read(path)
+            .map(Some)
+            .map_err(|_| "DESKTOP_CREDENTIAL_READ_FAILED".to_string())
     }
 
-    fn set(&self, _account: &str, _value: &[u8]) -> Result<(), String> {
-        Err("DESKTOP_CREDENTIAL_STORE_UNSUPPORTED".to_string())
+    fn set(&self, account: &str, value: &[u8]) -> Result<(), String> {
+        if value.is_empty() || value.len() as u64 > MAX_SECRET_BYTES {
+            return Err("DESKTOP_CREDENTIAL_WRITE_FAILED".to_string());
+        }
+        std::fs::create_dir_all(&self.data_dir)
+            .map_err(|_| "DESKTOP_CREDENTIAL_WRITE_FAILED".to_string())?;
+        let directory_metadata = std::fs::symlink_metadata(&self.data_dir)
+            .map_err(|_| "DESKTOP_CREDENTIAL_WRITE_FAILED".to_string())?;
+        if !directory_metadata.is_dir() || directory_metadata.file_type().is_symlink() {
+            return Err("DESKTOP_CREDENTIAL_WRITE_FAILED".to_string());
+        }
+
+        let destination = self
+            .secret_path(account)
+            .map_err(|_| "DESKTOP_CREDENTIAL_WRITE_FAILED".to_string())?;
+        if std::fs::symlink_metadata(&destination).is_ok_and(|metadata| {
+            metadata.file_type().is_symlink() || !metadata.is_file()
+        }) {
+            return Err("DESKTOP_CREDENTIAL_WRITE_FAILED".to_string());
+        }
+        let temporary = self.data_dir.join(format!(
+            ".{}.{}.tmp",
+            destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "DESKTOP_CREDENTIAL_WRITE_FAILED".to_string())?,
+            random_secret()
+        ));
+
+        let result = (|| {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&temporary)
+                .map_err(|_| "DESKTOP_CREDENTIAL_WRITE_FAILED".to_string())?;
+            file.write_all(value)
+                .map_err(|_| "DESKTOP_CREDENTIAL_WRITE_FAILED".to_string())?;
+            file.sync_all()
+                .map_err(|_| "DESKTOP_CREDENTIAL_WRITE_FAILED".to_string())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|_| "DESKTOP_CREDENTIAL_WRITE_FAILED".to_string())?;
+            }
+            std::fs::rename(&temporary, &destination)
+                .map_err(|_| "DESKTOP_CREDENTIAL_WRITE_FAILED".to_string())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
     }
 }
 
@@ -267,7 +348,8 @@ fn app_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 pub fn provider_configuration_status(
     app: AppHandle,
 ) -> Result<ProviderConfigurationStatus, String> {
-    provider_status(&SystemSecretStore, &app_data_dir(&app)?)
+    let data_dir = app_data_dir(&app)?;
+    provider_status(&LocalSecretStore::new(&data_dir), &data_dir)
 }
 
 #[tauri::command]
@@ -276,7 +358,7 @@ pub async fn configure_zhipu_provider(
     input: ProviderConfigurationInput,
 ) -> Result<ProviderConfigurationStatus, String> {
     let data_dir = app_data_dir(&app)?;
-    let status = configure_provider(&SystemSecretStore, &data_dir, input)?;
+    let status = configure_provider(&LocalSecretStore::new(&data_dir), &data_dir, input)?;
     app.state::<BackendState>().stop()?;
     let backend = start_backend(app.clone())
         .await
@@ -291,7 +373,7 @@ pub fn mark_zhipu_provider_validated(
 ) -> Result<ProviderConfigurationStatus, String> {
     let data_dir = app_data_dir(&app)?;
     mark_provider_validated(&data_dir)?;
-    provider_status(&SystemSecretStore, &data_dir)
+    provider_status(&LocalSecretStore::new(&data_dir), &data_dir)
 }
 
 #[cfg(test)]

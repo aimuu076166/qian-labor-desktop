@@ -10,7 +10,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
-use crate::credentials::{provider_environment, SystemSecretStore};
+use crate::credentials::{provider_environment, LocalSecretStore};
 use crate::process_ownership::OwnedSidecarProcess;
 
 const READY_FILE_PREFIX: &str = ".qian-sidecar-ready-";
@@ -370,7 +370,7 @@ pub async fn start_backend(app: AppHandle) -> Result<BackendProcess> {
             .context("DESKTOP_APP_DATA_DIR_UNAVAILABLE")?,
     };
     std::fs::create_dir_all(&data_dir).context("DESKTOP_APP_DATA_DIR_CREATE_FAILED")?;
-    let provider_env = provider_environment(&SystemSecretStore, &data_dir)
+    let provider_env = provider_environment(&LocalSecretStore::new(&data_dir), &data_dir)
         .map_err(anyhow::Error::msg)
         .context("DESKTOP_PROVIDER_SESSION_FAILED")?;
 
