@@ -165,7 +165,14 @@ class ProviderFact(BaseModel):
             "value_string_list",
             "value_json",
         ):
-            if field != field_for_type and getattr(self, field) is not None:
+            if (
+                field != field_for_type
+                and getattr(self, field) is not None
+                and not (
+                    field == "value_text"
+                    and self._redundant_text_matches_selected(selected)
+                )
+            ):
                 raise ValueError("PROVIDER_FACT_VALUE_AMBIGUOUS")
         return EmploymentFact(
             employee_id=self.employee_id,
@@ -175,6 +182,23 @@ class ProviderFact(BaseModel):
             source=self.source.to_source_locator(),
             needs_human_confirmation=self.needs_human_confirmation,
         )
+
+    def _redundant_text_matches_selected(self, selected: object | None) -> bool:
+        if self.value_text is None:
+            return False
+        text = self.value_text.strip()
+        try:
+            if self.value_type == "boolean":
+                return text.lower() == ("true" if selected is True else "false")
+            if self.value_type == "integer":
+                return int(text) == selected
+            if self.value_type == "number":
+                return math.isfinite(float(text)) and float(text) == selected
+            if self.value_type in {"string_list", "json"}:
+                return json.loads(text) == selected
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return False
 
     def _parse_limited_json(self) -> object | None:
         if self.value_type != "json":

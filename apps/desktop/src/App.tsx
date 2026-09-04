@@ -13,7 +13,6 @@ import {
   type EmployeeLedgerPayload,
 } from './features/employees/EmployeeLedger';
 import { FindingDetail, type FindingDetailData } from './features/findings/FindingDetail';
-import { ImportPanel } from './features/import/ImportPanel';
 import {
   MatchingReview,
   type MatchCandidate,
@@ -35,6 +34,7 @@ import {
   configureZhipuProvider,
   getProviderConfigurationStatus,
   markZhipuProviderValidated,
+  selectEmploymentFiles,
 } from './lib/desktop';
 
 type DesktopRequest = (path: string, init?: RequestInit) => Promise<Response>;
@@ -49,7 +49,7 @@ type ProviderValidator = () => Promise<ProviderConfigurationStatus>;
 type DesktopView =
   | { kind: 'booting' }
   | { kind: 'settings' }
-  | { kind: 'import' }
+  | { kind: 'home' }
   | { kind: 'processing'; analysisId: string }
   | { kind: 'matching'; analysisId: string }
   | { kind: 'dashboard'; analysisId: string }
@@ -57,13 +57,24 @@ type DesktopView =
   | { kind: 'employee'; analysisId: string; employeeId: string }
   | { kind: 'report'; analysisId: string }
   | { kind: 'finding'; analysisId: string; findingId: string }
-  | { kind: 'error'; code: string };
+  | { kind: 'error'; code: string; analysisId?: string };
 
 type ProcessingStatus = {
   analysis_id: string;
   status: string;
   progress: number;
   current_stage: string;
+  files?: Array<{ error_code?: string | null }>;
+};
+
+type LatestAnalysisPayload = {
+  analysis: null | {
+    id: string;
+    status: string;
+    progress: number;
+    current_stage: string;
+    error_code?: string | null;
+  };
 };
 
 type DashboardPayload = {
@@ -136,16 +147,60 @@ export function App({
   const [providerStatus, setProviderStatus] = useState<ProviderConfigurationStatus | null>(null);
   const [savingProvider, setSavingProvider] = useState(false);
   const [providerError, setProviderError] = useState<string | null>(null);
+  const [selectingMaterials, setSelectingMaterials] = useState(false);
   const dashboardLoadRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     Promise.all([backendLoader(), configurationLoader()])
-      .then(([info, configuration]) => {
+      .then(async ([info, configuration]) => {
         if (cancelled) return;
-        setApi(() => apiFactory(info));
+        const nextApi = apiFactory(info);
+        setApi(() => nextApi);
         setProviderStatus(configuration);
-        setView(configuration.validated ? { kind: 'import' } : { kind: 'settings' });
+        if (!configuration.validated) {
+          setView({ kind: 'settings' });
+          return;
+        }
+        const latestResponse = await nextApi('/api/analyses/latest');
+        if (cancelled) return;
+        if (latestResponse.status === 404) {
+          setView({ kind: 'home' });
+          return;
+        }
+        const latest = await readJson<LatestAnalysisPayload>(Promise.resolve(latestResponse));
+        if (!latest.analysis) {
+          setView({ kind: 'home' });
+          return;
+        }
+        const { id, status, error_code: errorCode } = latest.analysis;
+        if (status === 'failed') {
+          setView({
+            kind: 'error',
+            code: errorCode ?? 'DESKTOP_ANALYSIS_FAILED',
+            analysisId: id,
+          });
+          return;
+        }
+        if (status === 'matching_review') {
+          setView({ kind: 'matching', analysisId: id });
+          return;
+        }
+        if (status === 'completed' || status === 'partial') {
+          const payload = await readJson<DashboardPayload>(
+            nextApi(`/api/analyses/${id}/dashboard`),
+          );
+          if (cancelled) return;
+          setDashboard(payload);
+          dashboardLoadRef.current = id;
+          setView({ kind: 'dashboard', analysisId: id });
+          return;
+        }
+        if (['queued', 'parsing', 'extracting', 'evaluating'].includes(status)) {
+          setView({ kind: 'processing', analysisId: id });
+          return;
+        }
+        setView({ kind: 'home' });
       })
       .catch((error: unknown) => {
         if (!cancelled) setView({ kind: 'error', code: safeErrorCode(error) });
@@ -190,7 +245,12 @@ export function App({
     const processingStatus = processingQuery.data?.status;
     if (!processingStatus || !TERMINAL_PROCESSING_STATES.has(processingStatus)) return;
     if (processingStatus === 'failed') {
-      setView({ kind: 'error', code: 'DESKTOP_ANALYSIS_FAILED' });
+      const errorCode = processingQuery.data?.files?.find((item) => item.error_code)?.error_code;
+      setView({
+        kind: 'error',
+        code: errorCode ?? 'DESKTOP_ANALYSIS_FAILED',
+        analysisId: view.analysisId,
+      });
       return;
     }
     if (processingStatus === 'matching_review') {
@@ -256,6 +316,36 @@ export function App({
       setView({ kind: 'processing', analysisId: created.id });
     } catch (error) {
       setView({ kind: 'error', code: safeErrorCode(error) });
+    }
+  }
+
+  async function handleSelectMaterials() {
+    if (selectingMaterials) return;
+    setSelectingMaterials(true);
+    try {
+      const paths = await selectEmploymentFiles();
+      if (paths.length) await handleSelected(paths);
+    } catch (error) {
+      setView({ kind: 'error', code: safeErrorCode(error) });
+    } finally {
+      setSelectingMaterials(false);
+    }
+  }
+
+  async function handleRetryAnalysis() {
+    if (!api || view.kind !== 'error' || !view.analysisId) return;
+    const analysisId = view.analysisId;
+    try {
+      await readJson(
+        api(`/api/analyses/${analysisId}/process`, {
+          method: 'POST',
+        }),
+      );
+      queryClient.removeQueries({ queryKey: ['desktop-processing', analysisId] });
+      dashboardLoadRef.current = null;
+      setView({ kind: 'processing', analysisId });
+    } catch (error) {
+      setView({ kind: 'error', code: safeErrorCode(error), analysisId });
     }
   }
 
@@ -325,7 +415,7 @@ export function App({
       );
       const validated = await providerValidator();
       setProviderStatus(validated);
-      setView({ kind: 'import' });
+      setView({ kind: 'home' });
     } catch (error) {
       const message =
         error instanceof Error
@@ -385,13 +475,13 @@ export function App({
       setEmployee(null);
       setReport(null);
       dashboardLoadRef.current = null;
-      setView({ kind: 'import' });
+      setView({ kind: 'home' });
     } catch (error) {
       setView({ kind: 'error', code: safeErrorCode(error) });
     }
   }
 
-  function returnToImport() {
+  function returnHome() {
     setDashboard(null);
     setFinding(null);
     setEmployees(null);
@@ -401,7 +491,7 @@ export function App({
     setView(
       api
         ? providerStatus?.validated
-          ? { kind: 'import' }
+          ? { kind: 'home' }
           : { kind: 'settings' }
         : { kind: 'booting' },
     );
@@ -424,8 +514,13 @@ export function App({
         onSave={handleProviderSave}
       />
     );
-  } else if (view.kind === 'import') {
-    content = <ImportPanel onSelected={handleSelected} />;
+  } else if (view.kind === 'home') {
+    content = (
+      <DashboardView
+        onSelectMaterials={handleSelectMaterials}
+        selectingMaterials={selectingMaterials}
+      />
+    );
   } else if (view.kind === 'processing') {
     content = (
       <ProcessingPanel
@@ -456,6 +551,8 @@ export function App({
         onOpenEmployees={handleOpenEmployees}
         onOpenReport={handleOpenReport}
         onDeleteAnalysis={handleDeleteAnalysis}
+        onSelectMaterials={handleSelectMaterials}
+        selectingMaterials={selectingMaterials}
       />
     );
   } else if (view.kind === 'employees' && employees) {
@@ -494,9 +591,19 @@ export function App({
         <p className="eyebrow">本机分析未继续</p>
         <h2>无法继续本次分析</h2>
         <p className="muted">错误代码：{view.code}</p>
-        <button type="button" className="primary-action" onClick={returnToImport}>
-          返回材料导入
-        </button>
+        <div className="dashboard-actions">
+          {view.analysisId ? (
+            <button type="button" className="primary-action" onClick={handleRetryAnalysis}>
+              重新分析
+            </button>
+          ) : null}
+          <button type="button" className="secondary-action" onClick={handleSelectMaterials}>
+            选择其他材料
+          </button>
+          <button type="button" className="text-action" onClick={returnHome}>
+            返回风险概览
+          </button>
+        </div>
       </section>
     );
   } else {
@@ -514,7 +621,7 @@ export function App({
         <p className="eyebrow">QIAN LABOR DESKTOP</p>
         <h1>企安用工</h1>
         <p className="subtitle">本地优先劳动用工风险体检</p>
-        {providerStatus && ['import', 'dashboard', 'employees', 'employee', 'report'].includes(view.kind) ? (
+        {providerStatus && ['home', 'dashboard', 'employees', 'employee', 'report'].includes(view.kind) ? (
           <button
             type="button"
             className="text-action hero-settings-action"

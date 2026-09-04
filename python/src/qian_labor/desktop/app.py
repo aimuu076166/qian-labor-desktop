@@ -280,6 +280,42 @@ def create_desktop_app(
         item = AnalysisService(database).create(body.name, body.company_display_name)
         return AnalysisService.payload(item)
 
+    @app.get("/api/analyses/latest")
+    def latest_analysis() -> dict[str, object | None]:
+        with database.session() as session:
+            analysis = session.scalar(
+                select(AnalysisBatch)
+                .where(AnalysisBatch.deleted_at.is_(None))
+                .order_by(AnalysisBatch.created_at.desc(), AnalysisBatch.id.desc())
+                .limit(1)
+            )
+            if analysis is None:
+                return {"analysis": None}
+            files = list(
+                session.scalars(
+                    select(UploadedFile).where(UploadedFile.analysis_id == analysis.id)
+                )
+            )
+            all_files_failed = bool(files) and all(item.status == "failed" for item in files)
+            effective_status = (
+                "failed" if analysis.status == "partial" and all_files_failed else analysis.status
+            )
+            error_code = analysis.failure_reason or next(
+                (item.error_code for item in files if item.error_code),
+                None,
+            )
+            return {
+                "analysis": {
+                    "id": analysis.id,
+                    "status": effective_status,
+                    "progress": analysis.progress,
+                    "current_stage": (
+                        "failed" if effective_status == "failed" else analysis.current_stage
+                    ),
+                    "error_code": error_code,
+                }
+            }
+
     @app.post("/api/analyses/{analysis_id}/import-paths")
     def import_paths(analysis_id: str, body: ImportPathsRequest) -> dict[str, object]:
         try:

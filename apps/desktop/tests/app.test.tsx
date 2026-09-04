@@ -44,7 +44,79 @@ describe('App', () => {
     expect(screen.getByRole('heading', { name: '企安用工' })).toBeInTheDocument();
     expect(screen.getByText('本地优先劳动用工风险体检')).toBeInTheDocument();
     expect(screen.queryByText('访问码')).not.toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '企业用工风险概览' })).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: '选择企业材料' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '一次选择企业现有材料' })).not.toBeInTheDocument();
+  });
+
+  it('restores the latest completed analysis as the first page', async () => {
+    const request = vi.fn(async (path: string) => {
+      if (path === '/api/analyses/latest') {
+        return new Response(JSON.stringify({
+          analysis: {
+            id: 'analysis-latest', status: 'completed', progress: 100,
+            current_stage: 'completed', error_code: null,
+          },
+        }), { status: 200 });
+      }
+      if (path === '/api/analyses/analysis-latest/dashboard') {
+        return new Response(JSON.stringify({
+          summary: {
+            analysis_id: 'analysis-latest', status: 'completed', employee_count: 1,
+            finding_count: 0, high_count: 0, medium_count: 0, insufficient_data_count: 0,
+          },
+          findings: [],
+        }), { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    renderApp({
+      backendLoader: async () => ({ baseUrl: 'http://127.0.0.1:43123', token: 'test-token' }),
+      apiFactory: () => request,
+      configurationLoader: async () => validatedConfiguration,
+    });
+
+    expect(await screen.findByRole('heading', { name: '企业用工风险概览' })).toBeInTheDocument();
+    expect(screen.getByText('分析完成')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '选择企业材料' })).toBeInTheDocument();
+    expect(request).toHaveBeenCalledWith('/api/analyses/latest');
+  });
+
+  it('shows the preserved provider failure and permits retrying the same parsed material', async () => {
+    const request = vi.fn(async (path: string, init: RequestInit = {}) => {
+      if (path === '/api/analyses/latest') {
+        return new Response(JSON.stringify({
+          analysis: {
+            id: 'analysis-failed', status: 'failed', progress: 100,
+            current_stage: 'failed', error_code: 'AI_TIMEOUT',
+          },
+        }), { status: 200 });
+      }
+      if (path === '/api/analyses/analysis-failed/process' && init.method === 'POST') {
+        return new Response(JSON.stringify({ status: 'queued' }), { status: 202 });
+      }
+      if (path === '/api/analyses/analysis-failed/processing') {
+        return new Response(JSON.stringify({
+          analysis_id: 'analysis-failed', status: 'failed', progress: 100,
+          current_stage: 'failed', files: [{ error_code: 'AI_TIMEOUT' }],
+        }), { status: 200 });
+      }
+      return new Response('{}', { status: 404 });
+    });
+
+    renderApp({
+      backendLoader: async () => ({ baseUrl: 'http://127.0.0.1:43123', token: 'test-token' }),
+      apiFactory: () => request,
+      configurationLoader: async () => validatedConfiguration,
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('AI_TIMEOUT');
+    fireEvent.click(screen.getByRole('button', { name: '重新分析' }));
+    await waitFor(() => expect(request).toHaveBeenCalledWith(
+      '/api/analyses/analysis-failed/process',
+      { method: 'POST' },
+    ));
   });
 
   it('runs the desktop path from native selection through dashboard, source detail, and deletion', async () => {
@@ -215,7 +287,9 @@ describe('App', () => {
     });
 
     fireEvent.click(await screen.findByRole('button', { name: '选择企业材料' }));
-    expect(await screen.findByRole('heading', { name: '企业用工风险概览' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('分析完成')).toBeInTheDocument());
+    expect(screen.getByRole('heading', { name: '企业用工风险概览' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '选择企业材料' })).toBeInTheDocument();
     expect(screen.queryByText('无风险')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '查看员工台账' }));

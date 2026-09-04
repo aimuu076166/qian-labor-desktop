@@ -203,6 +203,100 @@ def test_zhipu_provider_rejects_invalid_json_contract() -> None:
         _provider(handler).extract("虚构合同.txt", b"fictional contract")
 
 
+def test_zhipu_provider_normalizes_the_observed_glm_value_json_key_truncation() -> None:
+    payload = _provider_payload()
+    fact = payload["facts"][0]
+    assert isinstance(fact, dict)
+    fact["value_"] = fact.pop("value_json")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _success_response(payload)
+
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+    assert result.facts[0].value is True
+
+
+def test_zhipu_provider_recovers_observed_generic_value_with_blank_value_type() -> None:
+    payload = _provider_payload()
+    fact = payload["facts"][0]
+    assert isinstance(fact, dict)
+    fact["value_type"] = ""
+    fact["value_"] = fact["value_boolean"]
+    fact["value_boolean"] = None
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _success_response(payload)
+
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+    assert result.facts[0].value is True
+
+
+def test_zhipu_provider_discards_a_fact_whose_value_type_cannot_feed_its_rule() -> None:
+    payload = _provider_payload()
+    fact = payload["facts"][0]
+    assert isinstance(fact, dict)
+    fact.update(
+        {
+            "fact_type": "employment.material_coverage",
+            "value_type": "text",
+            "value_text": "材料包含合同信息，但没有可计算的覆盖率",
+            "value_boolean": None,
+        }
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _success_response(payload)
+
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+    assert result.facts == []
+
+
+def test_zhipu_provider_accepts_consistent_redundant_text_for_a_typed_value() -> None:
+    payload = _provider_payload()
+    fact = payload["facts"][0]
+    assert isinstance(fact, dict)
+    fact["value_text"] = "true"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _success_response(payload)
+
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+    assert result.facts[0].value is True
+
+
+def test_zhipu_provider_discards_conflicting_redundant_text_for_a_typed_value() -> None:
+    payload = _provider_payload()
+    fact = payload["facts"][0]
+    assert isinstance(fact, dict)
+    fact["value_text"] = "false"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _success_response(payload)
+
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+    assert result.facts == []
+
+
+def test_zhipu_provider_discards_conflicting_generic_alias_fact_without_losing_batch() -> None:
+    payload = _provider_payload()
+    fact = payload["facts"][0]
+    assert isinstance(fact, dict)
+    fact["value_type"] = ""
+    fact["value_"] = "与结构化布尔值冲突的说明"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _success_response(payload)
+
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+    assert result.facts == []
+
+
 def test_zhipu_provider_retries_rate_limit_without_leaking_response_body() -> None:
     attempts = 0
 
@@ -217,6 +311,20 @@ def test_zhipu_provider_retries_rate_limit_without_leaking_response_body() -> No
 
     assert attempts == 2
     assert result.usage.attempts == 2
+
+
+def test_zhipu_provider_does_not_repeat_a_full_extraction_after_read_timeout() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("synthetic timeout", request=request)
+
+    with pytest.raises(AIProviderError, match="^AI_TIMEOUT$"):
+        _provider(handler, max_attempts=3).extract("虚构合同.txt", b"fictional contract")
+
+    assert attempts == 1
 
 
 def test_zhipu_connection_check_uses_one_small_request_without_extraction_schema() -> None:
@@ -281,6 +389,7 @@ def test_provider_factory_defaults_zhipu_to_glm_5_3_flash_and_official_base() ->
     assert provider.base_url == "https://open.bigmodel.cn/api/paas/v4"
     assert provider.text_model == "glm-5.3-flash"
     assert provider.vision_model == "glm-5.3-flash"
+    assert provider.timeout == 180
 
 
 def test_provider_factory_keeps_openai_official_default_when_base_url_is_blank() -> None:

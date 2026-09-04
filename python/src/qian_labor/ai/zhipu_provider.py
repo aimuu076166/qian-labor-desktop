@@ -9,7 +9,11 @@ from pathlib import Path
 import httpx
 from pydantic import ValidationError
 
-from qian_labor.ai.fact_contract import CANONICAL_FACT_TYPES, CANONICAL_FACT_TYPE_SET
+from qian_labor.ai.fact_contract import (
+    CANONICAL_FACT_TYPES,
+    CANONICAL_FACT_TYPE_SET,
+    FACT_VALUE_TYPES,
+)
 from qian_labor.ai.providers import AIProviderError
 from qian_labor.ai.schemas import ExtractionResult, ProviderExtractionResult, UsageRecord
 from qian_labor.security.local_redaction import (
@@ -40,7 +44,7 @@ class ZhipuChatCompletionsProvider:
         base_url: str,
         text_model: str,
         vision_model: str,
-        timeout: float = 30,
+        timeout: float = 180,
         *,
         client: httpx.Client | None = None,
         max_attempts: int = 3,
@@ -84,7 +88,7 @@ class ZhipuChatCompletionsProvider:
                     "max_tokens": 16,
                     "stream": False,
                 },
-                timeout=self.timeout,
+                timeout=min(self.timeout, 30),
             )
             response.raise_for_status()
         except httpx.TimeoutException:
@@ -150,13 +154,14 @@ class ZhipuChatCompletionsProvider:
                 response.raise_for_status()
                 break
             except (httpx.TransportError, httpx.HTTPStatusError) as error:
+                if isinstance(error, httpx.TimeoutException):
+                    failure_code = "AI_TIMEOUT"
+                    break
                 retryable = not isinstance(error, httpx.HTTPStatusError) or (
                     error.response.status_code == 429 or error.response.status_code >= 500
                 )
                 if attempts >= self.max_attempts or not retryable:
-                    if isinstance(error, httpx.TimeoutException):
-                        failure_code = "AI_TIMEOUT"
-                    elif (
+                    if (
                         isinstance(error, httpx.HTTPStatusError)
                         and error.response.status_code == 429
                     ):
@@ -202,11 +207,17 @@ class ZhipuChatCompletionsProvider:
         schema = ProviderExtractionResult.model_json_schema()
         schema_text = json.dumps(schema, ensure_ascii=False, separators=(",", ":"))
         fact_types = ", ".join(CANONICAL_FACT_TYPES)
+        value_type_contract = "; ".join(
+            f"{fact_type}={','.join(sorted(value_types))}"
+            for fact_type, value_types in FACT_VALUE_TYPES.items()
+        )
         system_prompt = (
             "You extract structured employment facts only; never make legal conclusions. "
             "Preserve uncertainty and source locations. Return one JSON object and no markdown. "
             "Every facts[].fact_type MUST be exactly one of these canonical values and no others: "
             f"{fact_types}. "
+            "Each fact must also use one of these value_type assignments: "
+            f"{value_type_contract}. "
             "Do not invent a fact when the material does not support it. "
             "The JSON must satisfy this schema exactly: "
             f"{schema_text}"
@@ -267,13 +278,34 @@ class ZhipuChatCompletionsProvider:
             content = message.get("content")
             if not isinstance(content, str):
                 raise TypeError
-            provider_result = ProviderExtractionResult.model_validate_json(content)
+            provider_payload = json.loads(content)
+            if not isinstance(provider_payload, dict):
+                raise TypeError
+            facts = provider_payload.get("facts")
+            if isinstance(facts, list):
+                normalized_facts = [
+                    normalized
+                    for fact in facts
+                    if (normalized := cls._normalize_fact_shape(fact)) is not None
+                ]
+                provider_payload = {**provider_payload, "facts": normalized_facts}
+            provider_result = ProviderExtractionResult.model_validate(provider_payload)
             if any(
                 fact.fact_type not in CANONICAL_FACT_TYPE_SET
                 for fact in provider_result.facts
             ):
                 raise ValueError("AI_FACT_TYPE_UNSUPPORTED")
-            result = provider_result.to_extraction_result()
+            compatible_facts = [
+                fact
+                for fact in provider_result.facts
+                if fact.value_type in FACT_VALUE_TYPES[fact.fact_type]
+            ]
+            result = provider_result.model_copy(update={"facts": []}).to_extraction_result()
+            for fact in compatible_facts:
+                try:
+                    result.facts.append(fact.to_employment_fact())
+                except ValueError:
+                    continue
             usage = payload.get("usage", {})
             if not isinstance(usage, dict):
                 raise TypeError
@@ -298,6 +330,60 @@ class ZhipuChatCompletionsProvider:
             ValueError,
         ):
             return None
+
+    @staticmethod
+    def _normalize_fact_shape(fact: object) -> object | None:
+        if not isinstance(fact, dict) or "value_" not in fact:
+            return fact
+        normalized = dict(fact)
+        generic_value = normalized.pop("value_")
+        value_type = normalized.get("value_type")
+        field_by_type = {
+            "text": "value_text",
+            "integer": "value_integer",
+            "number": "value_number",
+            "boolean": "value_boolean",
+            "string_list": "value_string_list",
+            "json": "value_json",
+        }
+        for value_field in field_by_type.values():
+            normalized.setdefault(value_field, None)
+        if value_type not in {*field_by_type, "null"}:
+            if generic_value is None:
+                value_type = "null"
+            elif isinstance(generic_value, bool):
+                value_type = "boolean"
+            elif isinstance(generic_value, int):
+                value_type = "integer"
+            elif isinstance(generic_value, float):
+                value_type = "number"
+            elif isinstance(generic_value, list) and all(
+                isinstance(item, str) for item in generic_value
+            ):
+                value_type = "string_list"
+            elif isinstance(generic_value, (dict, list)):
+                value_type = "json"
+                generic_value = json.dumps(
+                    generic_value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            elif isinstance(generic_value, str):
+                value_type = "text"
+            else:
+                return None
+            normalized["value_type"] = value_type
+        target_field = field_by_type.get(str(value_type))
+        if target_field is None:
+            if generic_value is not None:
+                return None
+            return normalized
+        existing = normalized.get(target_field)
+        if existing is None:
+            normalized[target_field] = generic_value
+        elif generic_value is not None and existing != generic_value:
+            return None
+        return normalized
 
     @staticmethod
     def _usage_token(usage: dict[str, object], field: str, default: int) -> int:

@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 
-from qian_labor.ai.fact_contract import CANONICAL_FACT_TYPES
+from qian_labor.ai.fact_contract import CANONICAL_FACT_TYPES, FACT_VALUE_TYPES
 from qian_labor.ai.providers import AIProviderError
 from qian_labor.ai.zhipu_provider import ZhipuChatCompletionsProvider
 from qian_labor.rules.registry import RULE_REGISTRY
@@ -20,6 +20,7 @@ def test_canonical_fact_contract_matches_exact_r01_r20_required_fact_union() -> 
         for fact_type in rule.metadata.required_facts
     }
     assert set(CANONICAL_FACT_TYPES) == expected
+    assert set(FACT_VALUE_TYPES) == expected
 
 
 def test_zhipu_prompt_lists_canonical_fact_types() -> None:

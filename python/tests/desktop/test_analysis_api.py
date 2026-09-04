@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from qian_labor.desktop.app import create_desktop_app
-from qian_labor.models.core import AnalysisBatch
+from qian_labor.models.core import AnalysisBatch, UploadedFile
 
 TOKEN = "desktop-analysis-api-token"
 HEADERS = {"X-Qian-Desktop-Token": TOKEN}
@@ -128,3 +128,52 @@ def test_analysis_endpoints_remain_launch_token_protected(tmp_path: Path) -> Non
     app = create_desktop_app(data_dir=tmp_path / "app-data", launch_token=TOKEN)
     with TestClient(app) as client:
         assert client.post("/api/analyses", json={"name": "x", "company_display_name": "y"}).status_code == 401
+
+
+def test_latest_analysis_returns_empty_home_and_normalizes_legacy_all_file_failure(
+    tmp_path: Path,
+) -> None:
+    app = create_desktop_app(data_dir=tmp_path / "app-data", launch_token=TOKEN)
+
+    with TestClient(app) as client:
+        empty = client.get("/api/analyses/latest", headers=HEADERS)
+        assert empty.status_code == 200
+        assert empty.json() == {"analysis": None}
+
+        with app.state.database.session() as session:
+            analysis = AnalysisBatch(
+                name="历史失败分析",
+                company_display_name="虚构企业",
+                status="partial",
+                current_stage="partial",
+                progress=100,
+                file_count=1,
+            )
+            session.add(analysis)
+            session.flush()
+            session.add(
+                UploadedFile(
+                    analysis=analysis,
+                    original_filename="虚构材料.docx",
+                    storage_key=f"analyses/{analysis.id}/failed.docx",
+                    mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    extension=".docx",
+                    size_bytes=10,
+                    sha256="a" * 64,
+                    status="failed",
+                    progress=55,
+                    error_code="AI_TIMEOUT",
+                )
+            )
+            session.commit()
+            analysis_id = analysis.id
+
+        latest = client.get("/api/analyses/latest", headers=HEADERS)
+        assert latest.status_code == 200
+        assert latest.json()["analysis"] == {
+            "id": analysis_id,
+            "status": "failed",
+            "progress": 100,
+            "current_stage": "failed",
+            "error_code": "AI_TIMEOUT",
+        }

@@ -99,6 +99,19 @@ h2 { letter-spacing: -.02em; }
 .category-list span { padding: 6px 9px; border-radius: 999px; background: #eef2f6; color: #536176; font-size: 12px; font-weight: 700; }
 .inline-warning { color: #7b5b25; font-size: 13px; }
 .dashboard-actions { display: flex; justify-content: flex-end; gap: 10px; margin: 0 0 22px; }
+.dashboard-empty-state {
+  display: grid;
+  min-height: 240px;
+  place-content: center;
+  gap: 8px;
+  padding: 28px;
+  border: 1px dashed #cfd7e1;
+  border-radius: 14px;
+  background: #f7f9fb;
+  text-align: center;
+}
+.dashboard-empty-state h3,
+.dashboard-empty-state p { margin: 0; }
 
 .employee-ledger,
 .employee-detail,
