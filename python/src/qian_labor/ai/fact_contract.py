@@ -43,3 +43,45 @@ CANONICAL_FACT_TYPES = (
 )
 
 CANONICAL_FACT_TYPE_SET = frozenset(CANONICAL_FACT_TYPES)
+
+# Each canonical fact is consumed by deterministic rules with a fixed runtime
+# shape. Provider JSON that names a canonical fact but supplies an incompatible
+# value must not reach those rules as if it were valid evidence.
+FACT_VALUE_TYPES: dict[str, frozenset[str]] = {
+    "analysis.minimum_core_coverage": frozenset({"integer", "number"}),
+    "employment.attendance.comp_time_evidence": frozenset({"boolean"}),
+    "employment.attendance.overtime_hours": frozenset({"integer", "number"}),
+    "employment.attendance.overtime_type": frozenset({"text"}),
+    "employment.attendance.present": frozenset({"boolean"}),
+    "employment.attendance_payroll.mismatch": frozenset({"boolean"}),
+    "employment.contract.employer": frozenset({"text"}),
+    "employment.contract.end_date": frozenset({"text"}),
+    "employment.contract.exists": frozenset({"boolean"}),
+    "employment.contract.start_date": frozenset({"text"}),
+    "employment.contract.term_readable": frozenset({"boolean"}),
+    "employment.contract.type": frozenset({"text"}),
+    "employment.entities": frozenset({"string_list"}),
+    "employment.entity_mismatch_explained": frozenset({"boolean"}),
+    "employment.evidence_after_contract_end": frozenset({"boolean"}),
+    "employment.identity.match_status": frozenset({"text"}),
+    "employment.material_coverage": frozenset({"integer", "number"}),
+    "employment.pay.actual_wage": frozenset({"integer", "number"}),
+    "employment.pay.comparable": frozenset({"boolean"}),
+    "employment.pay.contract_wage": frozenset({"integer", "number"}),
+    "employment.pay.overtime_evidence": frozenset({"boolean"}),
+    "employment.post_termination_record": frozenset({"boolean"}),
+    "employment.probation.assessment_exists": frozenset({"boolean"}),
+    "employment.probation.end_date": frozenset({"text"}),
+    "employment.probation.periods": frozenset({"json"}),
+    "employment.probation.start_date": frozenset({"text"}),
+    "employment.social_insurance.entity": frozenset({"text"}),
+    "employment.social_insurance.period_matches": frozenset({"boolean"}),
+    "employment.social_insurance.present": frozenset({"boolean"}),
+    "employment.social_insurance.waiver_language": frozenset({"boolean"}),
+    "employment.start_date": frozenset({"text"}),
+    "employment.status": frozenset({"text"}),
+    "employment.termination.delivery_exists": frozenset({"boolean"}),
+    "employment.termination.notice_exists": frozenset({"boolean"}),
+    "employment.termination.occurred": frozenset({"boolean"}),
+    "employment.termination.settlement_materials": frozenset({"string_list"}),
+}

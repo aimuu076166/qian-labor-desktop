@@ -5,7 +5,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = ROOT / "scripts" / "real_provider_smoke.py"
@@ -45,12 +44,16 @@ def test_real_provider_smoke_without_key_is_explicitly_not_run() -> None:
     ]
 
 
-def test_source_trace_count_uses_loaded_fact_values_not_sql_json_comparison() -> None:
+def test_source_trace_count_uses_persisted_source_fact_ids() -> None:
     smoke = _load_smoke_module()
-    facts = [
-        SimpleNamespace(source_locator_ids=["source-1"]),
-        SimpleNamespace(source_locator_ids=[]),
-        SimpleNamespace(source_locator_ids=["source-2", "source-3"]),
-    ]
 
-    assert smoke._count_sourced_facts(facts) == 2
+    assert smoke._count_sourced_facts(["fact-1", None, "fact-2", "fact-1"]) == 2
+
+
+def test_real_provider_smoke_reports_only_stable_failure_codes() -> None:
+    smoke = _load_smoke_module()
+
+    assert smoke._safe_failure_code(RuntimeError("STRUCTURED_FACTS_MISSING")) == (
+        "STRUCTURED_FACTS_MISSING"
+    )
+    assert smoke._safe_failure_code(RuntimeError("provider leaked a secret")) == "RuntimeError"

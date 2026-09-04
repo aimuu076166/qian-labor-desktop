@@ -43,7 +43,7 @@ def provider_from_settings(settings: Settings) -> AIProvider:
             else configured_base
         )
         text_model = settings.ai_text_model.strip() or ZHIPU_DEFAULT_MODEL
-        vision_model = settings.ai_vision_model.strip() or text_model
+        vision_model = settings.ai_vision_model.strip() or ZHIPU_DEFAULT_MODEL
         return ZhipuChatCompletionsProvider(
             settings.ai_api_key,
             base_url,

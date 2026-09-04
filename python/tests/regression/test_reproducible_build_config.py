@@ -14,6 +14,7 @@ MANIFEST = ROOT / "apps" / "desktop" / "src-tauri" / "Cargo.toml"
 LOCKFILE = MANIFEST.with_name("Cargo.lock")
 TOOLCHAIN = ROOT / "rust-toolchain.toml"
 WORKFLOW = ROOT / ".github" / "workflows" / "desktop-ci.yml"
+RC_WORKFLOW = ROOT / ".github" / "workflows" / "desktop-rc.yml"
 README = ROOT / "README.md"
 
 
@@ -295,7 +296,7 @@ def test_desktop_rust_release_inputs_are_tracked_and_resolvable() -> None:
         ],
         cwd=ROOT,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         check=False,
     )
     assert metadata.returncode == 0, metadata.stderr
@@ -565,3 +566,16 @@ def test_readme_documents_scoped_locked_dependency_verification() -> None:
         "cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked",
     ):
         assert command in readme
+
+
+def test_rc_workflow_keeps_action_majors_and_cargo_resolution_pinned() -> None:
+    workflow = RC_WORKFLOW.read_text(encoding="utf-8")
+    assert "actions/checkout@v4" in workflow
+    assert "actions/setup-node@v4" in workflow
+    assert "actions/setup-python@v5" in workflow
+    assert "pnpm/action-setup@v4" in workflow
+    assert "actions/upload-artifact@v4" in workflow
+    assert "actions/download-artifact@v4" in workflow
+    assert re.search(r"cargo (?:test|check) --locked", workflow)
+    assert " -- --locked" in workflow
+    assert "Cargo.lock" in workflow and "git diff --exit-code" in workflow

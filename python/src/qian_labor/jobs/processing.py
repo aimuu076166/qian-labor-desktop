@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -99,6 +100,7 @@ class ProcessingPipeline:
             analysis.status = "parsing"
             analysis.current_stage = "parsing"
             analysis.progress = 5
+            analysis.failure_reason = None
             files = list(
                 session.scalars(
                     select(UploadedFile)
@@ -109,11 +111,20 @@ class ProcessingPipeline:
             session.commit()
 
         failures = 0
+        failure_codes: list[str] = []
         for uploaded_file in files:
             try:
                 self._process_file(analysis_id, uploaded_file.id)
+            except AIProviderError as error:
+                failures += 1
+                error_code = str(error)
+                if not re.fullmatch(r"AI_[A-Z0-9_]+", error_code):
+                    error_code = "PROCESSING_FILE_FAILED"
+                failure_codes.append(error_code)
+                self._mark_file_failed(uploaded_file.id, error_code)
             except Exception:
                 failures += 1
+                failure_codes.append("PROCESSING_FILE_FAILED")
                 self._mark_file_failed(uploaded_file.id, "PROCESSING_FILE_FAILED")
 
         with self.database.session() as session:
@@ -131,11 +142,17 @@ class ProcessingPipeline:
                 )
                 or 0
             )
+            all_files_failed = bool(files) and failures == len(files)
             analysis.status = (
-                "partial" if failures else "matching_review" if pending_matches else "evaluating"
+                "failed"
+                if all_files_failed
+                else "matching_review"
+                if pending_matches
+                else "evaluating"
             )
             analysis.current_stage = analysis.status
-            analysis.progress = 100 if failures else 90 if pending_matches else 92
+            analysis.progress = 100 if all_files_failed else 90 if pending_matches else 92
+            analysis.failure_reason = failure_codes[0] if failures else None
             analysis.employee_count = int(
                 session.scalar(
                     select(func.count())
@@ -146,7 +163,7 @@ class ProcessingPipeline:
             )
             session.commit()
             session.refresh(analysis)
-            if failures:
+            if all_files_failed:
                 return self._status_payload(session, analysis)
 
         evaluator = RiskEvaluationService(self.database)
@@ -158,6 +175,9 @@ class ProcessingPipeline:
             analysis = session.get(AnalysisBatch, analysis_id)
             if analysis is None:
                 raise KeyError(analysis_id)
+            if failures and analysis.status == "completed":
+                analysis.status = "partial"
+                analysis.current_stage = "partial"
             if analysis.status == "completed":
                 analysis.completed_at = datetime.now(UTC)
             session.commit()
@@ -200,6 +220,7 @@ class ProcessingPipeline:
                 )
                 session.add(job)
             job.status = "running"
+            job.error_code = None
             job.attempts += 1
             job.started_at = datetime.now(UTC)
             uploaded_file.status = "parsing"
@@ -278,6 +299,7 @@ class ProcessingPipeline:
             job.started_at = datetime.now(UTC)
             uploaded_file.status = "extracting"
             uploaded_file.progress = 55
+            uploaded_file.error_code = None
             session.commit()
             original_filename = uploaded_file.original_filename
             job_attempt = job.attempts
@@ -905,6 +927,14 @@ class ProcessingPipeline:
                     job.status = "failed"
                     job.error_code = error_code
                     job.completed_at = datetime.now(UTC)
+                usages = session.scalars(
+                    select(AIUsageRecord).where(
+                        AIUsageRecord.file_id == file_id,
+                        AIUsageRecord.status == "running",
+                    )
+                )
+                for usage in usages:
+                    usage.status = "failed"
                 session.commit()
 
     @staticmethod

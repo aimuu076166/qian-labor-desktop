@@ -96,14 +96,19 @@ def _success_response(payload: dict[str, object] | None = None) -> httpx.Respons
     )
 
 
-def _provider(handler, *, privacy_boundary: PrivacyBoundary | None = None):
+def _provider(
+    handler,
+    *,
+    privacy_boundary: PrivacyBoundary | None = None,
+    max_attempts: int = 2,
+):
     return ZhipuChatCompletionsProvider(
         api_key="synthetic-zhipu-key-never-real",
         base_url="https://open.bigmodel.cn/api/paas/v4",
         text_model=MODEL,
         vision_model=MODEL,
         client=httpx.Client(transport=httpx.MockTransport(handler)),
-        max_attempts=2,
+        max_attempts=max_attempts,
         retry_delay_seconds=0,
         privacy_boundary=privacy_boundary or PrivacyBoundary(PEPPER),
     )
@@ -198,6 +203,100 @@ def test_zhipu_provider_rejects_invalid_json_contract() -> None:
         _provider(handler).extract("虚构合同.txt", b"fictional contract")
 
 
+def test_zhipu_provider_normalizes_the_observed_glm_value_json_key_truncation() -> None:
+    payload = _provider_payload()
+    fact = payload["facts"][0]
+    assert isinstance(fact, dict)
+    fact["value_"] = fact.pop("value_json")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _success_response(payload)
+
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+    assert result.facts[0].value is True
+
+
+def test_zhipu_provider_recovers_observed_generic_value_with_blank_value_type() -> None:
+    payload = _provider_payload()
+    fact = payload["facts"][0]
+    assert isinstance(fact, dict)
+    fact["value_type"] = ""
+    fact["value_"] = fact["value_boolean"]
+    fact["value_boolean"] = None
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _success_response(payload)
+
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+    assert result.facts[0].value is True
+
+
+def test_zhipu_provider_discards_a_fact_whose_value_type_cannot_feed_its_rule() -> None:
+    payload = _provider_payload()
+    fact = payload["facts"][0]
+    assert isinstance(fact, dict)
+    fact.update(
+        {
+            "fact_type": "employment.material_coverage",
+            "value_type": "text",
+            "value_text": "材料包含合同信息，但没有可计算的覆盖率",
+            "value_boolean": None,
+        }
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _success_response(payload)
+
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+    assert result.facts == []
+
+
+def test_zhipu_provider_accepts_consistent_redundant_text_for_a_typed_value() -> None:
+    payload = _provider_payload()
+    fact = payload["facts"][0]
+    assert isinstance(fact, dict)
+    fact["value_text"] = "true"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _success_response(payload)
+
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+    assert result.facts[0].value is True
+
+
+def test_zhipu_provider_discards_conflicting_redundant_text_for_a_typed_value() -> None:
+    payload = _provider_payload()
+    fact = payload["facts"][0]
+    assert isinstance(fact, dict)
+    fact["value_text"] = "false"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _success_response(payload)
+
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+    assert result.facts == []
+
+
+def test_zhipu_provider_discards_conflicting_generic_alias_fact_without_losing_batch() -> None:
+    payload = _provider_payload()
+    fact = payload["facts"][0]
+    assert isinstance(fact, dict)
+    fact["value_type"] = ""
+    fact["value_"] = "与结构化布尔值冲突的说明"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _success_response(payload)
+
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+    assert result.facts == []
+
+
 def test_zhipu_provider_retries_rate_limit_without_leaking_response_body() -> None:
     attempts = 0
 
@@ -214,7 +313,67 @@ def test_zhipu_provider_retries_rate_limit_without_leaking_response_body() -> No
     assert result.usage.attempts == 2
 
 
-def test_provider_factory_defaults_zhipu_to_glm_5_3_flash_and_official_base_url() -> None:
+def test_zhipu_provider_does_not_repeat_a_full_extraction_after_read_timeout() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("synthetic timeout", request=request)
+
+    with pytest.raises(AIProviderError, match="^AI_TIMEOUT$"):
+        _provider(handler, max_attempts=3).extract("虚构合同.txt", b"fictional contract")
+
+    assert attempts == 1
+
+
+def test_zhipu_connection_check_uses_one_small_request_without_extraction_schema() -> None:
+    captured: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": '{"ok":true}'}}
+                ]
+            },
+        )
+
+    _provider(handler).check_connection()
+
+    assert len(captured) == 1
+    assert captured[0]["model"] == MODEL
+    assert captured[0]["max_tokens"] <= 32
+    assert "employment-extraction-v1" not in json.dumps(captured[0], ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    ("business_code", "stable_code"),
+    [
+        (1113, "AI_ACCOUNT_ARREARS"),
+        (1302, "AI_RATE_LIMIT"),
+        (1305, "AI_PROVIDER_OVERLOADED"),
+        (1308, "AI_QUOTA_EXCEEDED"),
+        (1309, "AI_PLAN_EXPIRED"),
+    ],
+)
+def test_zhipu_429_business_codes_are_not_all_reported_as_rate_limit(
+    business_code: int,
+    stable_code: str,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            json={"error": {"code": business_code, "message": "never expose this body"}},
+        )
+
+    with pytest.raises(AIProviderError, match=f"^{stable_code}$"):
+        _provider(handler, max_attempts=1).check_connection()
+
+
+def test_provider_factory_defaults_zhipu_to_glm_5_3_flash_and_official_base() -> None:
     settings = Settings(
         app_secret="separate-app-secret",
         pii_hash_pepper=PEPPER,
@@ -228,8 +387,9 @@ def test_provider_factory_defaults_zhipu_to_glm_5_3_flash_and_official_base_url(
 
     assert isinstance(provider, ZhipuChatCompletionsProvider)
     assert provider.base_url == "https://open.bigmodel.cn/api/paas/v4"
-    assert provider.text_model == MODEL
-    assert provider.vision_model == MODEL
+    assert provider.text_model == "glm-5.3-flash"
+    assert provider.vision_model == "glm-5.3-flash"
+    assert provider.timeout == 180
 
 
 def test_provider_factory_keeps_openai_official_default_when_base_url_is_blank() -> None:
