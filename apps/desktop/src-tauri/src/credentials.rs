@@ -340,6 +340,51 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn local_secret_store_persists_owner_only_secret() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = temporary_directory("local-secret");
+        std::fs::create_dir_all(&directory).expect("create temporary directory");
+        let store = LocalSecretStore::new(&directory);
+
+        store
+            .set(API_KEY_ACCOUNT, b"synthetic-test-key-value")
+            .expect("store local secret");
+
+        assert_eq!(
+            store.get(API_KEY_ACCOUNT).expect("read local secret"),
+            Some(b"synthetic-test-key-value".to_vec())
+        );
+        let mode = std::fs::metadata(directory.join("zhipu-api-key.secret"))
+            .expect("read local secret metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_secret_store_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = temporary_directory("local-secret-symlink");
+        std::fs::create_dir_all(&directory).expect("create temporary directory");
+        let target = directory.join("unrelated.txt");
+        std::fs::write(&target, b"synthetic-unrelated-value").expect("write symlink target");
+        symlink(&target, directory.join("zhipu-api-key.secret")).expect("create secret symlink");
+        let store = LocalSecretStore::new(&directory);
+
+        assert_eq!(
+            store.get(API_KEY_ACCOUNT).unwrap_err(),
+            "DESKTOP_CREDENTIAL_READ_FAILED"
+        );
+        std::fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
     #[test]
     fn configuration_keeps_secrets_out_of_the_json_file() {
         let directory = temporary_directory("secret-boundary");

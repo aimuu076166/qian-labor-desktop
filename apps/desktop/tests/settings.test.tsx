@@ -26,6 +26,10 @@ describe('SettingsView', () => {
     expect(screen.getByLabelText('分析模型')).toHaveAttribute('readonly');
     expect(screen.queryByLabelText('文本模型')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('视觉模型')).not.toBeInTheDocument();
+    expect(
+      screen.getByText('API Key 仅保存在本机当前用户的应用私有目录。连接测试不发送企业或员工材料。'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Keychain|钥匙串/)).not.toBeInTheDocument();
     fireEvent.change(key, { target: { value: 'synthetic-ui-key-value' } });
     fireEvent.click(screen.getByRole('button', { name: '保存并测试连接' }));
 
