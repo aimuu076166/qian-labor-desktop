@@ -25,6 +25,15 @@ type SettingsViewProps = {
 
 const ZHIPU_MODEL = 'glm-5.3-flash';
 
+const PROVIDER_ERROR_MESSAGES: Record<string, string> = {
+  AI_ACCOUNT_ARREARS: '智谱账户欠费，请充值后重试。',
+  AI_RATE_LIMIT: '请求过于频繁，请等待一分钟后重试。',
+  AI_PROVIDER_OVERLOADED: '智谱模型当前访问量过大，请稍后重试。',
+  AI_QUOTA_EXCEEDED: '智谱额度已用完，请检查账户额度或等待重置。',
+  AI_PLAN_EXPIRED: '智谱套餐已到期，请续订后重试。',
+  AI_PROVIDER_ERROR: '智谱连接失败，请检查 API Key 与账户状态。',
+};
+
 export function SettingsView({
   status,
   saving = false,
@@ -65,7 +74,7 @@ export function SettingsView({
 
       {errorCode ? (
         <p className="settings-error" role="alert">
-          连接失败，错误代码：{errorCode}
+          连接失败：{PROVIDER_ERROR_MESSAGES[errorCode] ?? '请稍后重试。'}（{errorCode}）
         </p>
       ) : null}
 

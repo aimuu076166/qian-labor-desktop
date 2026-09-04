@@ -96,14 +96,19 @@ def _success_response(payload: dict[str, object] | None = None) -> httpx.Respons
     )
 
 
-def _provider(handler, *, privacy_boundary: PrivacyBoundary | None = None):
+def _provider(
+    handler,
+    *,
+    privacy_boundary: PrivacyBoundary | None = None,
+    max_attempts: int = 2,
+):
     return ZhipuChatCompletionsProvider(
         api_key="synthetic-zhipu-key-never-real",
         base_url="https://open.bigmodel.cn/api/paas/v4",
         text_model=MODEL,
         vision_model=MODEL,
         client=httpx.Client(transport=httpx.MockTransport(handler)),
-        max_attempts=2,
+        max_attempts=max_attempts,
         retry_delay_seconds=0,
         privacy_boundary=privacy_boundary or PrivacyBoundary(PEPPER),
     )
@@ -212,6 +217,52 @@ def test_zhipu_provider_retries_rate_limit_without_leaking_response_body() -> No
 
     assert attempts == 2
     assert result.usage.attempts == 2
+
+
+def test_zhipu_connection_check_uses_one_small_request_without_extraction_schema() -> None:
+    captured: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"role": "assistant", "content": '{"ok":true}'}}
+                ]
+            },
+        )
+
+    _provider(handler).check_connection()
+
+    assert len(captured) == 1
+    assert captured[0]["model"] == MODEL
+    assert captured[0]["max_tokens"] <= 32
+    assert "employment-extraction-v1" not in json.dumps(captured[0], ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    ("business_code", "stable_code"),
+    [
+        (1113, "AI_ACCOUNT_ARREARS"),
+        (1302, "AI_RATE_LIMIT"),
+        (1305, "AI_PROVIDER_OVERLOADED"),
+        (1308, "AI_QUOTA_EXCEEDED"),
+        (1309, "AI_PLAN_EXPIRED"),
+    ],
+)
+def test_zhipu_429_business_codes_are_not_all_reported_as_rate_limit(
+    business_code: int,
+    stable_code: str,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            json={"error": {"code": business_code, "message": "never expose this body"}},
+        )
+
+    with pytest.raises(AIProviderError, match=f"^{stable_code}$"):
+        _provider(handler, max_attempts=1).check_connection()
 
 
 def test_provider_factory_defaults_zhipu_to_glm_5_3_flash_and_official_base() -> None:

@@ -63,4 +63,25 @@ describe('SettingsView', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('AI_PROVIDER_ERROR');
     expect(screen.queryByText(/synthetic-ui-key-value/)).not.toBeInTheDocument();
   });
+
+  it('explains provider account arrears without exposing the provider response body', () => {
+    render(
+      <SettingsView
+        status={{
+          provider: 'zhipu',
+          configured: true,
+          validated: false,
+          textModel: 'glm-5.3-flash',
+          visionModel: 'glm-5.3-flash',
+          baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+        }}
+        errorCode="AI_ACCOUNT_ARREARS"
+        onSave={async () => undefined}
+      />,
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent('智谱账户欠费');
+    expect(screen.getByRole('alert')).toHaveTextContent('AI_ACCOUNT_ARREARS');
+    expect(screen.queryByText(/never expose this body/)).not.toBeInTheDocument();
+  });
 });

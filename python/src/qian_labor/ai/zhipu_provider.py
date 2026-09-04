@@ -26,6 +26,13 @@ class ZhipuChatCompletionsProvider:
     name = "zhipu"
     is_external = True
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    _RATE_LIMIT_CODES = {
+        1113: "AI_ACCOUNT_ARREARS",
+        1302: "AI_RATE_LIMIT",
+        1305: "AI_PROVIDER_OVERLOADED",
+        1308: "AI_QUOTA_EXCEEDED",
+        1309: "AI_PLAN_EXPIRED",
+    }
 
     def __init__(
         self,
@@ -53,6 +60,39 @@ class ZhipuChatCompletionsProvider:
         if privacy_boundary is None or not valid_external_pepper(privacy_boundary.pepper):
             raise AIProviderError("AI_PRIVACY_CONFIG_INVALID")
         self.privacy_boundary = privacy_boundary
+
+    def check_connection(self) -> None:
+        """Validate this key/model with one small request and no automatic retry burst."""
+        if not self.api_key or not self.text_model or not self.base_url:
+            raise AIProviderError("AI_PROVIDER_NOT_CONFIGURED")
+        try:
+            response = self.client.post(
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": self.text_model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": 'Return only this JSON object: {"ok":true}',
+                        }
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "max_tokens": 16,
+                    "stream": False,
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+        except httpx.TimeoutException:
+            raise AIProviderError("AI_TIMEOUT") from None
+        except httpx.HTTPStatusError as error:
+            raise AIProviderError(self._failure_code(error.response)) from None
+        except httpx.TransportError:
+            raise AIProviderError("AI_PROVIDER_ERROR") from None
 
     def extract(self, filename: str, content: bytes) -> ExtractionResult:
         extension = Path(filename).suffix.lower()
@@ -120,7 +160,7 @@ class ZhipuChatCompletionsProvider:
                         isinstance(error, httpx.HTTPStatusError)
                         and error.response.status_code == 429
                     ):
-                        failure_code = "AI_RATE_LIMIT"
+                        failure_code = self._failure_code(error.response)
                     else:
                         failure_code = "AI_PROVIDER_ERROR"
                     break
@@ -138,6 +178,19 @@ class ZhipuChatCompletionsProvider:
         if result.usage.estimated_cost_usd > self.batch_budget_usd:
             raise AIProviderError("AI_BUDGET_EXCEEDED")
         return result
+
+    @classmethod
+    def _failure_code(cls, response: httpx.Response) -> str:
+        if response.status_code != 429:
+            return "AI_PROVIDER_ERROR"
+        try:
+            payload = response.json()
+            error = payload.get("error") if isinstance(payload, dict) else None
+            raw_code = error.get("code") if isinstance(error, dict) else None
+            business_code = int(raw_code)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return "AI_RATE_LIMIT"
+        return cls._RATE_LIMIT_CODES.get(business_code, "AI_RATE_LIMIT")
 
     @staticmethod
     def _request_payload(

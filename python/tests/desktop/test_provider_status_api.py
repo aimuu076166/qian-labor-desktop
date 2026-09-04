@@ -18,6 +18,12 @@ class ExternalProviderStub:
     def __init__(self, failure: str | None = None) -> None:
         self.failure = failure
         self.calls: list[tuple[str, bytes]] = []
+        self.connection_checks = 0
+
+    def check_connection(self) -> None:
+        self.connection_checks += 1
+        if self.failure:
+            raise AIProviderError(self.failure)
 
     def extract(self, filename: str, content: bytes) -> ExtractionResult:
         self.calls.append((filename, content))
@@ -55,12 +61,8 @@ def test_real_provider_connection_test_uses_only_bundled_synthetic_content(
     assert status.json() == {"provider": "zhipu", "mode": "real", "configured": True}
     assert checked.status_code == 200
     assert checked.json() == {"provider": "zhipu", "status": "connected"}
-    assert provider.calls == [
-        (
-            "qian-provider-connection-check.txt",
-            b"QIAN_SYNTHETIC_CONNECTION_CHECK: no employee or company data.",
-        )
-    ]
+    assert provider.connection_checks == 1
+    assert provider.calls == []
 
 
 def test_real_provider_connection_failure_returns_only_a_stable_error_code(

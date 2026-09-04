@@ -253,10 +253,14 @@ def create_desktop_app(
         if not external:
             raise HTTPException(409, {"code": "AI_PROVIDER_NOT_CONFIGURED"})
         try:
-            app.state.ai_provider.extract(
-                "qian-provider-connection-check.txt",
-                b"QIAN_SYNTHETIC_CONNECTION_CHECK: no employee or company data.",
-            )
+            connection_check = getattr(app.state.ai_provider, "check_connection", None)
+            if callable(connection_check):
+                connection_check()
+            else:
+                app.state.ai_provider.extract(
+                    "qian-provider-connection-check.txt",
+                    b"QIAN_SYNTHETIC_CONNECTION_CHECK: no employee or company data.",
+                )
         except AIProviderError as error:
             raise HTTPException(502, {"code": str(error)}) from error
         return {"provider": app.state.ai_provider_name, "status": "connected"}
