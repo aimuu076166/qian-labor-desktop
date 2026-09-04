@@ -55,7 +55,7 @@ export function SettingsView({
           <p className="eyebrow">首次使用设置</p>
           <h2 id="settings-title">连接智谱 GLM</h2>
           <p className="muted">
-            API Key 只写入本机 macOS Keychain。连接测试不发送企业或员工材料。
+            API Key 仅保存在本机当前用户的应用私有目录。连接测试不发送企业或员工材料。
           </p>
         </div>
         <span className="status-pill">

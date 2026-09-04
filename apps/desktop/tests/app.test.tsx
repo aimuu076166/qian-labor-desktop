@@ -373,7 +373,7 @@ describe('App', () => {
     );
   });
 
-  it('blocks material import until a Keychain-backed Zhipu connection is validated', async () => {
+  it('blocks material import until a locally persisted Zhipu connection is validated', async () => {
     const configure = vi.fn(async () => ({
       ...validatedConfiguration,
       configured: true,

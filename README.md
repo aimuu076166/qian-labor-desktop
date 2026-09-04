@@ -27,7 +27,7 @@ Tauri 2
 → 每次启动生成随机 IPC token
 → SQLite 初始化或恢复
 → 首次启动在应用内配置并验证智谱 API Key
-→ API Key 与隐私 pepper 仅存入 macOS Keychain
+→ API Key 与隐私 pepper 存入当前用户的应用私有目录
 → 原生文件选择器选择材料
 → 文件复制到应用私有目录
 → 本地解析和隐私处理
@@ -61,7 +61,7 @@ Tauri 2
 
 面向普通用户的桌面流程只开放智谱 Provider。首次启动必须在设置页输入并通过连接测试；未配置或未验证时，材料分析会被明确阻止，外部调用失败也不会降级为 Fake。`FakeAIProvider` 仅供自动化测试和显式打包 smoke 使用，不能作为用户流程的无密钥兜底。
 
-桌面主程序从 macOS Keychain 读取秘密后，仅在启动 sidecar 时注入其进程环境；React 不接触 Key 或 pepper。开发和维护脚本仍可使用以下运行环境变量：
+桌面主程序从当前用户的应用私有目录读取秘密后，仅在启动 sidecar 时注入其进程环境；React 不接触 Key 或 pepper。开发和维护脚本仍可使用以下运行环境变量：
 
 ```text
 AI_PROVIDER
@@ -86,9 +86,9 @@ API Key 不得：
 - 打入安装包；
 - 出现在截图。
 
-macOS 版本已经提供面向普通用户的安全设置页。连接测试成功后，API Key 和随机生成的 `PII_HASH_PEPPER` 存放在当前用户的 macOS Keychain；界面只显示“已配置”，不会回显 Key。主程序还会先移除继承环境中可能存在的 Provider 秘密，再把 Keychain 中的值只注入受控 sidecar 进程。
+macOS 版本已经提供面向普通用户的设置页。连接测试成功后，API Key 和随机生成的 `PII_HASH_PEPPER` 分项存放在当前用户的应用私有目录，Unix/macOS 文件权限限制为 `0600`；界面只显示“已配置”，不会回显 Key。主程序还会先移除继承环境中可能存在的 Provider 秘密，再把本地私有文件中的值只注入受控 sidecar 进程。该方案避免无 Developer ID 签名 RC 反复触发 Keychain 授权，但同一用户权限下的其他进程理论上可读取这些文件，静态保护弱于 macOS Keychain。
 
-`PII_HASH_PEPPER` 同样属于秘密，适用上述禁止提交、记录、写入 fixture、打包和截图的规则；应用首次配置时生成至少 32 个字符的随机值，并与 API Key 分项保存在 Keychain。
+`PII_HASH_PEPPER` 同样属于秘密，适用上述禁止提交、记录、写入 fixture、打包和截图的规则；应用首次配置时生成至少 32 个字符的随机值，并与 API Key 分项保存在应用私有目录。
 
 ## 开发环境
 
@@ -179,7 +179,7 @@ shasum -a 256 -c SHA256SUMS.txt
 
 校验失败时不要安装或绕过警告。不要要求测试者全局关闭 Gatekeeper；如需继续，只能对已核对哈希的单个内部候选按本机安全策略处理。
 
-Fake Provider 仅用于自动化测试和显式打包 smoke；普通用户流程只接受经连接测试验证的智谱 Provider。API Key 与本地隐私 pepper 存放在 macOS Keychain，不写入 React、SQLite、日志或安装包。完成 synthetic 验收并退出应用后，如需清除本地测试数据，应先确认主程序和 sidecar 已退出，再删除当前用户下的应用数据目录：macOS 为 `~/Library/Application Support/cn.qianlabor.desktop`。清理前应确认目录标识符完全一致，避免删除其他应用数据。
+Fake Provider 仅用于自动化测试和显式打包 smoke；普通用户流程只接受经连接测试验证的智谱 Provider。API Key 与本地隐私 pepper 存放在权限为 `0600` 的应用私有文件中，不写入 React、SQLite、日志或安装包。完成 synthetic 验收并退出应用后，如需清除本地测试数据，应先确认主程序和 sidecar 已退出，再删除当前用户下的应用数据目录：macOS 为 `~/Library/Application Support/cn.qianlabor.desktop`。清理前应确认目录标识符完全一致，避免删除其他应用数据。
 
 只有 macOS ARM64 的 built-sidecar、正常 packaged-app、Launch Services 启动与异常生命周期清理 smoke 都真实通过，最终下载产物经独立重算 SHA-256 后一致，并且由用户自有 Key 完成 exact-head 真实 Provider synthetic 验收，RC Pull Request 才能从 Draft 转为 Ready。动态 commit、run ID、大小和 SHA-256 以 PR 的 exact-head 证据、`BUILD-MANIFEST.json` 与 `SHA256SUMS.txt` 为准，不回填到源码模板形成 provenance 循环。缺少真实 Provider 验收时必须保持 Draft，不能用 Fake、源码测试、bundle 检查或推测替代 `PASS`。详细规则见 `docs/release/v0.1.0-rc.1-checklist.md`。
 
