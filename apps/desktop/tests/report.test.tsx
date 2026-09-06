@@ -1,10 +1,14 @@
-import { fireEvent, render, screen } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
 import { ReportView } from '../src/features/report/ReportView';
 
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+
 describe('analysis report', () => {
-  it('renders consistent findings and invokes the macOS print flow', () => {
-    const onPrint = vi.fn();
+  beforeEach(() => { vi.mocked(invoke).mockReset(); });
+
+  function renderReport() {
     render(
       <ReportView
         payload={{
@@ -47,14 +51,33 @@ describe('analysis report', () => {
           ],
         }}
         onBack={vi.fn()}
-        onPrint={onPrint}
       />,
     );
+  }
 
+  it('renders findings and requests native printing through the real desktop bridge', async () => {
+    let finishPrint!: () => void;
+    vi.mocked(invoke).mockImplementation(() => new Promise<void>((resolve) => { finishPrint = resolve; }));
+    renderReport();
     expect(screen.getByRole('heading', { name: '企业用工风险体检报告' })).toBeInTheDocument();
     expect(screen.getByText('完全虚构企业')).toBeInTheDocument();
     expect(screen.getByText(/虚构合同\.docx/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '打印或保存 PDF' }));
-    expect(onPrint).toHaveBeenCalledOnce();
+    expect(invoke).toHaveBeenCalledWith('print_analysis_report');
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: '正在打开打印窗口…' })).toBeDisabled();
+    finishPrint();
+    await waitFor(() => expect(screen.getByRole('button', { name: '打印或保存 PDF' })).toBeEnabled());
+  });
+
+  it('shows a safe error if native printing fails and allows another attempt', async () => {
+    vi.mocked(invoke).mockRejectedValueOnce(new Error('private native details')).mockResolvedValueOnce(undefined);
+    renderReport();
+    fireEvent.click(screen.getByRole('button', { name: '打印或保存 PDF' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('无法打开系统打印窗口，请重试。');
+    expect(screen.queryByText(/private native details/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '打印或保存 PDF' }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

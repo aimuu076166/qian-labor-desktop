@@ -17,6 +17,13 @@ fn startup_error(code: &'static str) -> Box<dyn std::error::Error> {
     Box::new(io::Error::other(code))
 }
 
+// WKWebView does not reliably present a dialog for window.print(). Use the
+// native print operation on the invoking window, never a renderer-supplied path.
+#[tauri::command]
+async fn print_analysis_report(window: tauri::WebviewWindow) -> Result<(), &'static str> {
+    window.print().map_err(|_| "DESKTOP_PRINT_FAILED")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -26,7 +33,8 @@ pub fn run() {
             desktop_backend_info,
             provider_configuration_status,
             configure_zhipu_provider,
-            mark_zhipu_provider_validated
+            mark_zhipu_provider_validated,
+            print_analysis_report
         ])
         .setup(|app| {
             let backend = match tauri::async_runtime::block_on(start_backend(app.handle().clone()))

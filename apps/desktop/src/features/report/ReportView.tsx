@@ -1,3 +1,6 @@
+import { useRef, useState } from 'react';
+import { printAnalysisReport } from '../../lib/desktop';
+
 export type ReportPayload = {
   analysis_id: string;
   company_name: string;
@@ -50,18 +53,38 @@ function sourceLocation(location: Record<string, unknown>): string {
 export function ReportView({
   payload,
   onBack,
-  onPrint = () => window.print(),
 }: {
   payload: ReportPayload;
   onBack: () => void;
-  onPrint?: () => void;
 }) {
+  const printInFlight = useRef(false);
+  const [printing, setPrinting] = useState(false);
+  const [printError, setPrintError] = useState(false);
+
+  async function handlePrint() {
+    if (printInFlight.current) return;
+    printInFlight.current = true;
+    setPrinting(true);
+    setPrintError(false);
+    try {
+      await printAnalysisReport();
+    } catch {
+      setPrintError(true);
+    } finally {
+      printInFlight.current = false;
+      setPrinting(false);
+    }
+  }
+
   return (
     <article className="report-view" aria-labelledby="report-title">
       <div className="report-toolbar print-hidden">
         <button type="button" className="secondary-action" onClick={onBack}>返回风险概览</button>
-        <button type="button" className="primary-action" onClick={onPrint}>打印或保存 PDF</button>
+        <button type="button" className="primary-action" onClick={handlePrint} disabled={printing}>
+          {printing ? '正在打开打印窗口…' : '打印或保存 PDF'}
+        </button>
       </div>
+      {printError ? <p role="alert" className="error-message print-hidden">无法打开系统打印窗口，请重试。</p> : null}
       <header className="report-header">
         <p className="eyebrow">QIAN LABOR DESKTOP</p>
         <h2 id="report-title">企业用工风险体检报告</h2>

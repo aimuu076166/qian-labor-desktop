@@ -7,6 +7,10 @@ import type {
 
 const extensions = ['csv', 'xls', 'xlsx', 'docx', 'pdf', 'png', 'jpg', 'jpeg', 'webp'];
 
+export async function printAnalysisReport(): Promise<void> {
+  return invoke<void>('print_analysis_report');
+}
+
 export async function selectEmploymentFiles(): Promise<string[]> {
   const selected = await open({
     multiple: true,
