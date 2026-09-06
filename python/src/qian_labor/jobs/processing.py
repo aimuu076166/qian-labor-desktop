@@ -15,7 +15,7 @@ from qian_labor.ai.providers import (
     FakeAIProvider,
     OpenAIResponsesProvider,
 )
-from qian_labor.ai.schemas import ExtractionResult
+from qian_labor.ai.schemas import ExtractionResult, SourceLocator
 from qian_labor.database import Database, create_database
 from qian_labor.matching.scoring import score_candidate
 from qian_labor.matching.types import CandidateIdentity
@@ -353,6 +353,7 @@ class ProcessingPipeline:
             )
             self._provider_calls += 1
             result = self.provider.extract(item.filename, item.content)
+            self._bind_spreadsheet_sources(result, parsed, original_filename)
             projected_cost = self._estimated_cost_usd + result.usage.estimated_cost_usd
             self._complete_usage_record(usage_key, result)
             self._estimated_cost_usd = projected_cost
@@ -429,11 +430,14 @@ class ProcessingPipeline:
         blocks_by_page: dict[int, list[str]] = {}
         document_blocks: list[str] = []
         for block in parsed.blocks:
+            text = block.text
+            if parsed.kind == "spreadsheet":
+                text = f"[source {json.dumps(block.locator, ensure_ascii=False)}]\n{text}"
             page = block.locator.get("page")
             if isinstance(page, int) and page > 0:
-                blocks_by_page.setdefault(page, []).append(block.text)
+                blocks_by_page.setdefault(page, []).append(text)
             else:
-                document_blocks.append(block.text)
+                document_blocks.append(text)
 
         for page, texts in sorted(blocks_by_page.items()):
             inputs.append((f"{original_filename}-page-{page}.txt", "\n".join(texts).encode()))
@@ -449,6 +453,49 @@ class ProcessingPipeline:
             for page in parsed.vision_pages
         )
         return inputs or [(original_filename, content)]
+
+    @staticmethod
+    def _bind_spreadsheet_sources(
+        result: ExtractionResult, parsed: ParsedDocument, filename: str
+    ) -> None:
+        """Use parser-owned row evidence, never a model-invented coordinate/excerpt."""
+        if parsed.kind != "spreadsheet":
+            return
+        rows: dict[tuple[str, int], list[str]] = {}
+        for block in parsed.blocks:
+            row = block.locator.get("row")
+            if block.block_type == "header" or not isinstance(row, int) or not block.text.strip():
+                continue
+            key = (str(block.locator.get("sheet", "")), row)
+            rows.setdefault(key, []).extend(part.strip() for part in block.text.split(" | "))
+
+        for fact in result.facts:
+            identity = fact.employee_id or result.employee_number
+            candidates = [
+                key for key, cells in rows.items() if identity and identity in cells
+            ]
+            if not identity and len(rows) == 1:
+                candidates = list(rows)
+            # An exact, sufficiently long original excerpt can disambiguate rows.
+            excerpt = fact.source.excerpt.strip()
+            if len(candidates) != 1 and len(excerpt) >= 12:
+                matching = [
+                    key for key in (candidates or list(rows))
+                    if excerpt in " | ".join(rows[key])
+                ]
+                if len(matching) == 1:
+                    candidates = matching
+            if len(candidates) == 1:
+                sheet, row = candidates[0]
+                fact.source = SourceLocator(
+                    file_name=filename,
+                    sheet=sheet or None,
+                    row=row,
+                    excerpt=" | ".join(rows[candidates[0]]),
+                )
+            else:
+                fact.source = SourceLocator(file_name=filename)
+                fact.needs_human_confirmation = True
 
     def _persist_result(
         self,
