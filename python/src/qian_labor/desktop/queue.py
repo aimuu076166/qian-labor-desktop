@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
 from threading import Event, Lock
 from typing import Any
@@ -39,6 +40,44 @@ class DesktopProcessingQueue:
                 self._active = None
                 self._active_analysis_id = None
             return self._submitting_analysis_id or self._active_analysis_id
+
+    def wait_for_idle(self, analysis_id: str, *, timeout: float = 5.0) -> bool:
+        """Wait for this analysis' worker to finish its terminal-state cleanup.
+
+        Processing publishes ``matching_review`` before the task owner records
+        its terminal run state and releases the queue future.  A user can
+        therefore click a matching decision in that small window.  Waiting
+        here removes the transient busy error without weakening the mutation
+        reservation or allowing two mutations to run at once.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            with self._lock:
+                submitting = self._submitting_analysis_id == analysis_id
+                active = (
+                    self._active
+                    if self._active_analysis_id == analysis_id
+                    and self._active is not None
+                    and not self._active.done()
+                    else None
+                )
+                submission_done = self._submission_done if submitting else None
+            if active is None and submission_done is None:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if active is not None:
+                try:
+                    active.result(timeout=remaining)
+                except FutureTimeoutError:
+                    return False
+                except Exception:
+                    # The task has stopped; the endpoint will report any
+                    # persisted task/error state through its normal path.
+                    pass
+            else:
+                submission_done.wait(remaining)
 
     @contextmanager
     def mutation(self, analysis_id: str) -> Iterator[None]:

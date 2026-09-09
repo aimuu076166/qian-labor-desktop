@@ -399,6 +399,8 @@ def create_desktop_app(
         analysis_id: str, body: MatchDecisionRequest
     ) -> dict[str, object]:
         try:
+            if not processing_queue.wait_for_idle(analysis_id):
+                raise RuntimeError("DESKTOP_ANALYSIS_BUSY")
             with processing_queue.mutation(analysis_id):
                 return EmployeeMatcher(database).decide(analysis_id, body)
         except KeyError:

@@ -145,6 +145,18 @@ def test_submission_reservation_covers_prepare_and_failed_submit_rollback(monkey
     queue.shutdown()
 
 
+def test_wait_for_idle_allows_terminal_matching_cleanup_to_finish():
+    queue = DesktopProcessingQueue(lambda: None)
+    queue._executor.shutdown()
+    gate = Event()
+    queue._executor = ThreadPoolExecutor(max_workers=1)
+    queue.submit("synthetic", execute=lambda: (gate.wait(5), {"status": "matching_review"})[1])
+    assert queue.wait_for_idle("synthetic", timeout=0.01) is False
+    gate.set()
+    assert queue.wait_for_idle("synthetic", timeout=2) is True
+    queue.shutdown()
+
+
 def test_executor_rejection_restores_only_its_reserved_analysis_and_releases_reservation(imported_case, monkeypatch):
     app, client, analysis_id, extra = imported_case
     def reject(*_args, **_kwargs):
