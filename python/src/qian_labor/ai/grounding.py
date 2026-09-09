@@ -15,6 +15,30 @@ EXTRACTION_VERSION = "parser-grounding-v1"
 MAX_TEXT_CHARACTERS = 100_000
 PROOF_KEY = "_grounding"
 POSITION_KEYS = ("page", "sheet", "row", "column", "cell", "paragraph", "table", "block", "bbox")
+_PLANNED_LANGUAGE = re.compile(r"拟|计划|待签|草案|意向|预计|将于|尚未|待定")
+
+
+def semantic_review_required(fact_type: str, source_text: str) -> bool:
+    """Keep temporal/role ambiguity out of confirmed rule inputs.
+
+    The provider may report a fact from a sentence that is locally genuine but
+    only describes a future plan, a delivery event, or a note.  We retain the
+    observation and exact evidence, while forcing the existing human-review
+    state instead of treating the sentence as an established event.
+    """
+    if _PLANNED_LANGUAGE.search(source_text):
+        return True
+    if fact_type == "employment.termination.occurred":
+        if any(marker in source_text for marker in ("送达", "签收")) and not any(
+            marker in source_text for marker in ("解除日期", "终止日期", "解除劳动关系", "结束劳动关系")
+        ):
+            return True
+    if fact_type in {"employment.social_insurance.present", "employment.social_insurance.period_matches"}:
+        if any(marker in source_text for marker in ("备注", "放弃", "自愿")) and not any(
+            marker in source_text for marker in ("缴费记录", "已缴", "已提供")
+        ):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -123,6 +147,9 @@ def ground_result(result: ExtractionResult, item: ExtractionInput, filename: str
             located.source = SourceLocator(file_name=filename, excerpt=mask_sensitive(block.text), **location)
             located.needs_human_confirmation |= len(candidates) > 1 or (
                 bool(identity) and "row" not in location and not contains_identity(block.text, identity))
+            located.needs_human_confirmation |= semantic_review_required(
+                located.fact_type, block.text
+            )
             facts.append(located)
             proofs.append({"version": EXTRACTION_VERSION, "status": "locally_located",
                            "requires_review": located.needs_human_confirmation or result.needs_human_confirmation})

@@ -12,6 +12,8 @@ import pymupdf as fitz
 import xlrd
 from charset_normalizer import from_bytes
 from docx import Document
+from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE as RELATIONSHIP
 from openpyxl import load_workbook
 from openpyxl.utils.cell import coordinate_to_tuple
 from PIL import Image, ImageOps
@@ -22,6 +24,8 @@ MAX_ROWS = 10_000
 MAX_COLUMNS = 200
 MAX_PDF_PAGES = 100
 MAX_RENDER_PIXELS = 8_000_000
+MAX_DOCX_IMAGES = 50
+MAX_DOCX_IMAGE_BYTES = 12_000_000
 
 
 def readable_cell(value: Any) -> str:
@@ -195,6 +199,50 @@ class ParserRegistry:
     def _parse_docx(self, content: bytes) -> ParsedDocument:
         document = Document(BytesIO(content))
         blocks: list[ParsedBlock] = []
+        vision_pages: list[VisionPage] = []
+        warnings: list[str] = []
+
+        def embedded_images(paragraph, locator: dict[str, Any]) -> None:
+            nonlocal vision_pages
+            for blip in paragraph._p.xpath(".//a:blip"):
+                if len(vision_pages) >= MAX_DOCX_IMAGES:
+                    raise ValueError("DOCX_IMAGE_COUNT_LIMIT")
+                relationship_id = blip.get(qn("r:embed"))
+                relationship = document.part.rels.get(relationship_id)
+                if relationship is None or relationship.reltype != RELATIONSHIP.IMAGE:
+                    warnings.append("embedded_image_unreadable")
+                    continue
+                image_part = relationship.target_part
+                image_bytes = getattr(image_part, "blob", b"")
+                if not image_bytes or len(image_bytes) > MAX_DOCX_IMAGE_BYTES:
+                    raise ValueError("DOCX_IMAGE_SIZE_LIMIT")
+                try:
+                    with Image.open(BytesIO(image_bytes)) as image:
+                        width, height = image.size
+                        if width * height > MAX_RENDER_PIXELS:
+                            raise ValueError("DOCX_IMAGE_PIXEL_LIMIT")
+                        image.load()
+                        media_type = Image.MIME.get(image.format or "", "image/png")
+                except ValueError as error:
+                    if str(error) == "DOCX_IMAGE_PIXEL_LIMIT":
+                        raise
+                    warnings.append("embedded_image_unreadable")
+                    continue
+                except OSError:
+                    warnings.append("embedded_image_unreadable")
+                    continue
+                image_number = len(vision_pages) + 1
+                vision_pages.append(
+                    VisionPage(
+                        page=1,
+                        media_type=media_type,
+                        image_bytes=image_bytes,
+                        width=width,
+                        height=height,
+                        locator={**locator, "image": image_number},
+                    )
+                )
+
         for index, paragraph in enumerate(document.paragraphs, start=1):
             if paragraph.text.strip():
                 blocks.append(
@@ -204,6 +252,7 @@ class ParserRegistry:
                         locator={"paragraph": index},
                     )
                 )
+            embedded_images(paragraph, {"paragraph": index})
         for table_index, table in enumerate(document.tables, start=1):
             for row_index, row in enumerate(table.rows, start=1):
                 for column_index, cell in enumerate(row.cells, start=1):
@@ -219,8 +268,25 @@ class ParserRegistry:
                                 },
                             )
                         )
-        warnings = ["embedded_images_need_vision"] if document.inline_shapes else []
-        return ParsedDocument("docx", blocks, warnings=warnings)
+                    for paragraph_index, paragraph in enumerate(cell.paragraphs, start=1):
+                        embedded_images(
+                            paragraph,
+                            {
+                                "table": table_index,
+                                "row": row_index,
+                                "column": column_index,
+                                "paragraph": paragraph_index,
+                            },
+                        )
+        if document.inline_shapes and not vision_pages and "embedded_image_unreadable" not in warnings:
+            warnings.append("embedded_image_unreadable")
+        return ParsedDocument(
+            "docx",
+            blocks,
+            needs_vision=bool(document.inline_shapes),
+            vision_pages=vision_pages,
+            warnings=warnings,
+        )
 
     def _parse_pdf(self, content: bytes) -> ParsedDocument:
         document = fitz.open(stream=content, filetype="pdf")

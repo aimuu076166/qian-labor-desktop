@@ -57,6 +57,13 @@ from qian_labor.settings import Settings
 from qian_labor.storage.local import LocalStorage
 
 
+# Keep the provider request small enough that the JSON contract and advisory
+# can finish within one response.  The limit applies to serialized parser
+# blocks, not to an arbitrary slice of UTF-8 bytes, so a source block is never
+# silently split or dropped.
+MAX_EXTRACTION_CHUNK_CHARACTERS = 16_000
+
+
 def provider_from_settings(settings: Settings) -> AIProvider:
     if settings.ai_provider == "fake":
         return FakeAIProvider()
@@ -226,6 +233,7 @@ class ProcessingPipeline:
                 uploaded_file.progress = 100
                 uploaded_file.detected_kind = parsed.kind
                 session.commit()
+            self._refresh_analysis_progress(analysis_id)
         return bool(parsed.warnings)
 
     @classmethod
@@ -270,6 +278,7 @@ class ProcessingPipeline:
             uploaded_file.status = "parsing"
             uploaded_file.progress = 15
             session.commit()
+        self._refresh_analysis_progress(analysis_id)
 
         parsed = self.parsers.parse(uploaded_file.original_filename, content)
         with self.database.session() as session:
@@ -315,6 +324,7 @@ class ProcessingPipeline:
             job.status = "succeeded"
             job.completed_at = datetime.now(UTC)
             session.commit()
+        self._refresh_analysis_progress(analysis_id)
         return parsed
 
     def _extract(
@@ -367,6 +377,7 @@ class ProcessingPipeline:
                 )
                 or 0
             )
+        self._refresh_analysis_progress(analysis_id)
 
         inputs = self._extraction_inputs(original_filename, content, parsed)
         # Check every text input before the first provider call for this file.
@@ -403,10 +414,19 @@ class ProcessingPipeline:
             checkpoint()
             context = inputs[index]
             if item.ocr_blocks:
-                context = ExtractionInput(context.filename, context.content, tuple(
+                ocr_blocks = tuple(
                     ParsedBlock(b.text, b.block_type, {**b.locator, "page": context.page})
                     for b in item.ocr_blocks
-                ), context.page)
+                )
+                image_context = tuple(
+                    block for block in context.blocks if block.block_type == "image_context"
+                )
+                context = ExtractionInput(
+                    context.filename,
+                    context.content,
+                    ocr_blocks + image_context,
+                    context.page,
+                )
             grounding = ground_result(result, context, original_filename)
             from qian_labor.ai.grounding import ground_advisory
             advisory_grounding.append(ground_advisory(result.contract_advisory, context, original_filename,
@@ -443,6 +463,7 @@ class ProcessingPipeline:
             job.status = "succeeded"
             job.completed_at = datetime.now(UTC)
             session.commit()
+        self._refresh_analysis_progress(analysis_id)
         return False
 
     def _begin_usage_record(
@@ -506,19 +527,59 @@ class ProcessingPipeline:
         def payload(blocks):
             return "\n".join(f"[source {json.dumps(b.locator, ensure_ascii=False)}]\n{b.text}" for b in blocks).encode()
 
+        def chunk(blocks: list[ParsedBlock]) -> list[tuple[ParsedBlock, ...]]:
+            chunks: list[tuple[ParsedBlock, ...]] = []
+            current: list[ParsedBlock] = []
+            for block in blocks:
+                single = payload([block])
+                if len(single.decode("utf-8", errors="replace")) > MAX_EXTRACTION_CHUNK_CHARACTERS:
+                    raise AIProviderError("AI_TEXT_LIMIT_EXCEEDED")
+                candidate = payload([*current, block])
+                if current and len(candidate.decode("utf-8", errors="replace")) > MAX_EXTRACTION_CHUNK_CHARACTERS:
+                    chunks.append(tuple(current))
+                    current = []
+                current.append(block)
+            if current:
+                chunks.append(tuple(current))
+            return chunks
+
         for page, texts in sorted(blocks_by_page.items()):
-            inputs.append(ExtractionInput(f"{original_filename}-page-{page}.txt", payload(texts), tuple(texts), page))
+            page_chunks = chunk(texts)
+            for part, blocks in enumerate(page_chunks, start=1):
+                suffix = f"-part-{part}" if len(page_chunks) > 1 else ""
+                inputs.append(ExtractionInput(
+                    f"{original_filename}-page-{page}{suffix}.txt",
+                    payload(list(blocks)),
+                    blocks,
+                    page,
+                ))
         if document_blocks:
-            filename = (
-                f"{original_filename}-document.txt"
+            document_chunks = chunk(document_blocks)
+            base = (
+                f"{original_filename}-document"
                 if blocks_by_page or parsed.vision_pages
                 else original_filename
             )
-            inputs.append(ExtractionInput(filename, payload(document_blocks), tuple(document_blocks)))
-        inputs.extend(
-            ExtractionInput(f"{original_filename}-page-{page.page}.png", page.image_bytes, page=page.page)
-            for page in parsed.vision_pages
-        )
+            for part, blocks in enumerate(document_chunks, start=1):
+                if len(document_chunks) == 1 and not blocks_by_page and not parsed.vision_pages:
+                    filename = base
+                else:
+                    suffix = f"-part-{part}" if len(document_chunks) > 1 else ""
+                    filename = f"{base}{suffix}.txt"
+                inputs.append(ExtractionInput(filename, payload(list(blocks)), blocks))
+        for page in parsed.vision_pages:
+            locator = getattr(page, "locator", {}) or {}
+            image_index = locator.get("image")
+            if image_index is not None:
+                filename = f"{original_filename}-image-{image_index}.png"
+            else:
+                filename = f"{original_filename}-page-{page.page}.png"
+            context = (
+                (ParsedBlock("", "image_context", dict(locator)),)
+                if locator
+                else ()
+            )
+            inputs.append(ExtractionInput(filename, page.image_bytes, context, page.page))
         if not inputs:
             raise AIProviderError("AI_NO_SUPPORTED_FACTS")
         return inputs
@@ -1109,6 +1170,29 @@ class ProcessingPipeline:
                 for usage in usages:
                     usage.status = "failed"
                 session.commit()
+            analysis_id = uploaded_file.analysis_id if uploaded_file else None
+        if analysis_id:
+            self._refresh_analysis_progress(analysis_id)
+
+    def _refresh_analysis_progress(self, analysis_id: str) -> None:
+        """Publish durable per-file progress while a batch is still running."""
+        with self.database.session() as session:
+            analysis = session.get(AnalysisBatch, analysis_id)
+            if analysis is None or analysis.status in {
+                "completed", "partial", "failed", "cancelled", "interrupted", "matching_review"
+            }:
+                return
+            files = list(session.scalars(select(UploadedFile).where(UploadedFile.analysis_id == analysis_id)))
+            if not files:
+                return
+            analysis.progress = max(5, min(89, round(sum(file.progress for file in files) / len(files))))
+            if any(file.status == "extracting" for file in files):
+                analysis.current_stage = "extracting"
+            elif any(file.status == "parsing" for file in files):
+                analysis.current_stage = "parsing"
+            elif any(file.status in {"uploaded", "interrupted"} for file in files):
+                analysis.current_stage = "queued"
+            session.commit()
 
     @staticmethod
     def _job_key(analysis_id: str, file_id: str, job_type: str, input_hash: str) -> str:

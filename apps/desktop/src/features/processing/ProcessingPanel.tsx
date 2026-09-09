@@ -5,7 +5,7 @@ type ProcessingPanelProps = {
   status: string;
   progress: number;
   task?: AnalysisTask;
-  files?: Array<{ id: string; filename: string; status: string }>;
+  files?: Array<{ id: string; filename: string; status: string; progress?: number; error_code?: string | null }>;
   onResume?: () => void;
   onRetry?: () => void;
   onMatching?: () => void;
@@ -38,7 +38,13 @@ export function TaskControls({ task, files, onResume, onRetry, onMatching }: Pic
   return <section className="task-controls" aria-label="任务控制">
     {task.run ? <p role="status">{TASK_LABELS[task.run.state]}</p> : <p>{task.data ? '尚无已启动任务。' : '任务状态尚未核实。'}</p>}
     {task.run?.in_flight ? <p>当前有已发出的模型调用，正在等待返回。</p> : null}
-    {files ? <p>已完成 {files.filter(file => file.status === 'processed').length} 份，部分完成 {files.filter(file => file.status === 'partial').length} 份；已有材料与已保存结果保留，未完成内容仍待处理。</p> : <p>材料清单尚待读取，已有材料与已保存结果保留。</p>}
+    {files ? <>
+      <p>已完成 {files.filter(file => file.status === 'processed').length} 份，部分完成 {files.filter(file => file.status === 'partial').length} 份，失败 {files.filter(file => file.status === 'failed').length} 份；已有材料与已保存结果保留，未完成内容仍待处理。</p>
+      {files.find(file => ['parsing', 'extracting'].includes(file.status)) ? (() => {
+        const current = files.find(file => ['parsing', 'extracting'].includes(file.status))!;
+        return <p role="status">当前材料：{current.filename} · {current.status === 'parsing' ? '正在解析' : '正在提取'}{typeof current.progress === 'number' ? `（${Math.round(current.progress)}%）` : ''}</p>;
+      })() : null}
+    </> : <p>材料清单尚待读取，已有材料与已保存结果保留。</p>}
     <p>已经发出的模型请求可能继续消耗额度；取消确认不代表远端请求已停止，也不代表零费用。</p>
     {task.error ? <p role="alert">{describeOperationError(task.error)}</p> : null}
     {task.pending ? <p role="alert">操作结果尚未核实，不会重复提交。<button type="button" disabled={task.busy} onClick={task.reconcile}>核对处理状态</button></p> : null}

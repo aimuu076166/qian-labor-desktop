@@ -55,15 +55,40 @@ function suggestedNumber(candidate?: MatchCandidate): string {
 }
 
 export function MatchingReview(props: MatchingReviewProps) {
-  const candidate = props.candidates[0];
+  const [selectedId, setSelectedId] = useState(props.candidates[0]?.id ?? '');
+  useEffect(() => {
+    if (!props.candidates.some(candidate => candidate.id === selectedId)) {
+      setSelectedId(props.candidates[0]?.id ?? '');
+    }
+  }, [props.candidates, selectedId]);
+  const candidate = props.candidates.find(item => item.id === selectedId) ?? props.candidates[0];
   if (!candidate) return <section className="status-card" aria-label="matching-review-empty">
     <p>正在确认匹配结果…</p>
   </section>;
-  return <CandidateReview key={candidate.id} {...props} candidate={candidate} />;
+  return <section className="matching-review" aria-labelledby="matching-review-title">
+    <div className="section-heading">
+      <div>
+        <p className="eyebrow">人工匹配</p>
+        <h2 id="matching-review-title">请先确认员工匹配</h2>
+        <p className="muted">还有 {props.candidates.length} 项匹配事项。按员工和材料逐项核对，全部确认后才会继续风险计算。</p>
+      </div>
+    </div>
+    <ol className="matching-candidate-list" aria-label="待确认匹配事项">
+      {props.candidates.map(item => <li key={item.id}>
+        <button type="button" className={item.id === candidate.id ? 'selected' : ''}
+          aria-current={item.id === candidate.id ? 'true' : undefined}
+          onClick={() => setSelectedId(item.id)} disabled={props.submitting}>
+          <span>{item.employee_name}{item.employee_number ? ` · ${item.employee_number}` : ''}</span>
+          <small>{item.material_name ?? '未命名材料'} · {item.fact_ids.length} 条事实</small>
+        </button>
+      </li>)}
+    </ol>
+    <CandidateReview key={candidate.id} {...props} candidate={candidate} />
+  </section>;
 }
 
 function CandidateReview({
-  candidates, candidate, error, currentCompanyId, employeeRecordOptions = [], draftCache,
+  candidate, error, currentCompanyId, employeeRecordOptions = [], draftCache,
   submitting = false,
   onDecision,
 }: MatchingReviewProps & { candidate: MatchCandidate }) {
@@ -76,22 +101,12 @@ function CandidateReview({
   const selectedRecord = employeeRecordOptions.find(item => item.id === employeeId);
 
   return (
-    <section className="matching-review" aria-labelledby="matching-review-title">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">人工匹配</p>
-          <h2 id="matching-review-title">请先确认员工匹配</h2>
-          <p className="muted">
-            还有 {candidates.length} 项材料需要确认。全部确认后才会继续风险计算。
-          </p>
-        </div>
-      </div>
-
+    <section className="match-card" aria-label="当前匹配事项">
       {error ? <p role="alert">{error === 'MATCH_EMPLOYEE_NUMBER_EXISTS' || error === 'WORKSPACE_EMPLOYEE_NUMBER_EXISTS'
         ? '该工号已存在，请选择已有员工确认归属，不要重复创建。'
         : `确认未完成：${describeOperationError(error)}输入已保留，请核对后重试。`}</p> : null}
 
-      <article className="match-card">
+      <article>
         <div className="match-evidence">
           <span>材料</span>
           <strong>{candidate.material_name ?? '未命名材料'}</strong>

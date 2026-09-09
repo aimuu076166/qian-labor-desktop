@@ -122,6 +122,20 @@ describe('MatchingReview', () => {
     );
   });
 
+  it('shows each pending material and lets the user review one candidate at a time', () => {
+    const onDecision = vi.fn(async () => undefined);
+    render(<MatchingReview candidates={[candidate(), candidate({
+      id: 'candidate-two', material_name: '另一份虚构材料.xlsx', fact_ids: ['fact-two'],
+      extracted_fields: { employee_ids: ['F-002'], fact_ids: ['fact-two'] }, employee_number: 'F-002',
+    })]} onDecision={onDecision} />);
+
+    expect(screen.getByText(/还有 2 项匹配事项/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /虚构待匹配材料\.docx/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /另一份虚构材料\.xlsx/ }));
+    expect(screen.getByText('另一份虚构材料.xlsx')).toBeInTheDocument();
+    expect(screen.getByLabelText('确认工号（可选）')).toHaveValue('F-002');
+  });
+
   it('merges a duplicate source employee into the selected target', async () => {
     const onDecision = vi.fn(async () => undefined);
     render(<MatchingReview candidates={[candidate()]} onDecision={onDecision} />);

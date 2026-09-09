@@ -400,7 +400,10 @@ def test_ten_employee_real_mixed_inputs_local_corrections_consistent_without_pro
                     "correct" if row["fact_type"].endswith("end_date") else "confirm"))
                 assert response.status_code == 200, response.text
     result = local_evaluate(client, base)
-    assert result["fresh"] and result["completeness"] == "partial"  # embedded DOCX image remains incomplete
+    # Embedded DOCX images are now sent through the same local-privacy/vision
+    # path as standalone images; the complete synthetic corpus can therefore
+    # reach a complete local reevaluation once the facts are confirmed.
+    assert result["fresh"] and result["completeness"] == "complete"
     assert provider.calls == before_calls
     workbench = client.get(f'/api/company-workspaces/{co["id"]}/current').json()
     assert len(workbench["employees"]) == 10

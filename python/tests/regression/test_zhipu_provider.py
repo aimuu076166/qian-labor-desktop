@@ -203,6 +203,20 @@ def test_zhipu_provider_rejects_invalid_json_contract() -> None:
         _provider(handler).extract("虚构合同.txt", b"fictional contract")
 
 
+def test_zhipu_provider_rejects_parseable_json_when_generation_is_truncated() -> None:
+    payload = _success_response().json()
+    assert isinstance(payload, dict)
+    choices = payload["choices"]
+    assert isinstance(choices, list)
+    choices[0]["finish_reason"] = "length"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
+        _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+
 def test_zhipu_provider_normalizes_the_observed_glm_value_json_key_truncation() -> None:
     payload = _provider_payload()
     fact = payload["facts"][0]

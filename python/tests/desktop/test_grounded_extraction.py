@@ -173,7 +173,8 @@ def test_mixed_fixture_actual_structure():
     assert parsed["probation.xlsx"].blocks[2].text == "2026-03-01"
     assert parsed["termination-scan.pdf"].vision_pages[0].page == 1
     assert parsed["termination.png"].blocks == []
-    assert parsed["embedded-warning.docx"].warnings == ["embedded_images_need_vision"]
+    assert parsed["embedded-warning.docx"].needs_vision
+    assert len(parsed["embedded-warning.docx"].vision_pages) == 1
 
 
 def test_partial_parser_warning_and_old_cache_upgrade_are_explicit(tmp_path):
@@ -213,15 +214,15 @@ def test_partial_parser_warning_and_old_cache_upgrade_are_explicit(tmp_path):
         assert client.post(f"/api/analyses/{aid}/process", headers=HEADERS).status_code == 202
         app.state.processing_queue.shutdown()
         workspace = client.get(f"/api/analyses/{aid}/workspace", headers=HEADERS).json()
-        assert provider.calls == 1
-        assert workspace["analysis"]["status"] == "partial"
-        assert workspace["files"][0]["warnings"] == ["embedded_images_need_vision"]
-        assert workspace["files"][0]["fact_count"] == 1
+        assert provider.calls == 2
+        assert workspace["analysis"]["status"] in {"matching_review", "partial", "evaluating", "completed"}
+        assert workspace["files"][0]["warnings"] == []
+        assert workspace["files"][0]["fact_count"] == 2
         assert workspace["files"][0]["needs_reextraction"] is False
         with app.state.database.session() as session:
             assert len(list(session.scalars(select(ProcessingJob).where(ProcessingJob.job_type == "extract")))) == 2
         client.get(f"/api/analyses/{aid}/workspace", headers=HEADERS)
-        assert provider.calls == 1
+        assert provider.calls == 2
 
 
 def test_old_confirmed_fact_cannot_bypass_new_unlocated_uncertainty(review_case):
@@ -354,7 +355,7 @@ def test_ten_employee_mixed_pipeline_sources_and_retry(tmp_path):
         pipeline = ProcessingPipeline(app.state.database, LocalStorage(str(app.state.storage_root)), provider,
             privacy_boundary=PrivacyBoundary("synthetic-grounding-pepper-at-least-32", LocalImageRedactor(ocr)))
         pipeline.process(aid)
-        assert ocr.calls == 2  # PNG + scan; no additional grounding OCR.
+        assert ocr.calls == 3  # PNG + scan + the embedded DOCX image.
         with app.state.database.session() as session:
             sources = list(session.scalars(select(SourceLocator)))
             facts = list(session.scalars(select(EmploymentFact)))

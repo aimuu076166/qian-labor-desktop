@@ -16,6 +16,10 @@ class VisionPage:
     image_bytes: bytes
     width: int
     height: int
+    # Optional parser-owned context for formats (such as DOCX) that have an
+    # embedded image but no physical page coordinate.  Consumers must treat
+    # this as a coarse source hint, never as a fabricated page number.
+    locator: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

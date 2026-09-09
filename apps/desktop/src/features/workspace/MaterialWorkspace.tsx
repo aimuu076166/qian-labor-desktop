@@ -41,7 +41,7 @@ export function MaterialWorkspace({ payload, configured, busy, error, onAdd, onP
     </div>
     {!readOnly ? <><p className="muted">开始分析后，需要模型提取的材料将在本地脱敏后发送至你配置的智谱官方通道；脱敏可能存在遗漏，AI 输出仍需人工复核。</p>
       <p className="muted">仅处理尚未完成提取、没有有效输出或需要更新来源核验及条款观察的材料，可能消耗所选通道额度；已有材料和结果会保留，新提取可能改变判断。</p></> : null}
-    {!readOnly ? <p className="muted">模型未执行或无法读取的条款，可明确开始分析重试；会重新发送该文件的脱敏内容（包括已成功部分），可能再次消耗额度。仅内嵌图片遗漏不会重复调用，请将图片单独导入。</p> : null}
+    {!readOnly ? <p className="muted">模型未执行或无法读取的条款，可明确开始分析重试；会重新发送该文件的脱敏内容（包括已成功部分），可能再次消耗额度。无法读取的内嵌图片会明确显示为部分材料，不会被静默忽略。</p> : null}
     {payload.files.some(file => file.needs_reextraction) ? <p role="status">部分旧版材料尚未完成当前来源核验；明确开始分析后才会重新提取。</p> : null}
     {error ? <p role="alert">{describeOperationError(error)}</p> : null}
     {importResults?.length ? <ImportResults results={importResults} /> : null}

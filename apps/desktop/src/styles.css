@@ -309,6 +309,28 @@ h2 { letter-spacing: -.02em; }
   border-radius: 14px;
   background: #fbfcfd;
 }
+.matching-candidate-list {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+}
+.matching-candidate-list button {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #d7dfe8;
+  border-radius: 10px;
+  background: #fff;
+  color: #35445a;
+  text-align: left;
+  cursor: pointer;
+}
+.matching-candidate-list button.selected { border-color: #35445a; background: #f1f4f7; }
+.matching-candidate-list small { color: #687386; }
 .match-evidence {
   display: grid;
   grid-template-columns: 100px minmax(0, 1fr);
@@ -459,12 +481,20 @@ h2 { letter-spacing: -.02em; }
 }
 
 @media print {
+  @page { size: A4; margin: 16mm 14mm; }
   :root, body { background: white; }
   .app-shell { display: block; padding: 0; background: white; }
   .hero, .print-hidden { display: none !important; }
-  .report-view { width: 100%; padding: 0; border: 0; border-radius: 0; box-shadow: none; }
+  .workspace-content { display: block; padding: 0; overflow: visible; }
+  .report-view { width: auto; max-width: none; padding: 0; border: 0; border-radius: 0; box-shadow: none; overflow: visible; }
   .report-metrics { grid-template-columns: repeat(6, 1fr); }
   .assessment-scope { display: block !important; break-inside: avoid; }
+  .report-header h2, .report-section h3, .report-finding h4 { break-after: avoid; }
+  .report-view p, .report-view li { orphans: 3; widows: 3; }
+  .report-view table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+  .report-view th, .report-view td { overflow-wrap: anywhere; vertical-align: top; }
+  .report-view thead { display: table-header-group; }
+  .report-view tr { break-inside: avoid; }
 }
 
 @media (max-width: 680px) {
