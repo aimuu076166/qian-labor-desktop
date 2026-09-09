@@ -4,7 +4,70 @@ import { ProcessingPanel } from '../src/features/processing/ProcessingPanel';
 import { DashboardView } from '../src/features/dashboard/DashboardView';
 import { FindingDetail } from '../src/features/findings/FindingDetail';
 
+const MATERIALS_SCOPE = {
+  identifier: 'labor_materials_v1' as const,
+  display_label: '用工材料体检 v1',
+  excluded_rule_codes: ['R09', 'R13', 'R14', 'R15'],
+  excluded_rule_ids: ['WAGE_PAYMENT', 'OVERTIME', 'ATTENDANCE', 'SEVERANCE_CALCULATION'],
+  not_evaluated_reasons: {
+    R16: '现有离职后记录为工资、考勤、社保合并事实，无法核实社保延续来源，本项暂未评估。',
+  },
+  payroll_evaluated: false,
+  attendance_evaluated: false,
+  settlement_document_label: '结算文件（final_pay），不要求工资表，不计算工资或补偿',
+};
+
 describe('desktop analysis views', () => {
+  it('shows the server-provided materials scope and the R16 limitation without exposing rule ids', () => {
+    render(<DashboardView summary={{ analysis_id: 'synthetic', status: 'completed', employee_count: 1,
+      finding_count: 0, high_count: 0, medium_count: 0, insufficient_data_count: 0 }} findings={[]}
+      overview={{ company_name: '虚构企业', assessment_scope: MATERIALS_SCOPE,
+        summary: { coverage_rate: 1, affected_employee_count: 0, requires_human_review_count: 0,
+          deadline_30_count: 0, classification_pending: false }, categories: [],
+        material_coverage: { overall: 1, classification_pending: false, items: [] } }} />);
+
+    expect(screen.getByText(/用工材料体检 v1/)).toBeInTheDocument();
+    expect(screen.getByText(/工资核算与考勤核算未评估/)).toBeInTheDocument();
+    expect(screen.getByText(/无法核实社保延续来源/)).toBeInTheDocument();
+    expect(screen.getByText(/结算文件.*不要求工资表/)).toBeInTheDocument();
+    expect(screen.queryByText(/WAGE_PAYMENT|R09|R13|R14|R15/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^无风险$/)).not.toBeInTheDocument();
+  });
+
+  it('labels a legacy scope as historical and full', () => {
+    render(<DashboardView summary={{ analysis_id: 'legacy', status: 'completed', employee_count: 1,
+      finding_count: 0, high_count: 0, medium_count: 0, insufficient_data_count: 0 }} findings={[]}
+      overview={{ company_name: '虚构企业', assessment_scope: { ...MATERIALS_SCOPE,
+        identifier: 'legacy_full_v1', display_label: '历史完整规则范围 v1', excluded_rule_codes: [],
+        excluded_rule_ids: [], not_evaluated_reasons: {}, payroll_evaluated: true, attendance_evaluated: true },
+        summary: { coverage_rate: 1, affected_employee_count: 0, requires_human_review_count: 0,
+          deadline_30_count: 0, classification_pending: false }, categories: [],
+        material_coverage: { overall: 1, classification_pending: false, items: [] } }} />);
+    expect(screen.getByText(/历史完整评估范围/)).toBeInTheDocument();
+  });
+
+  it('states that assessment scope is unconfirmed when the payload omits it', () => {
+    render(<DashboardView summary={{ analysis_id: 'unknown', status: 'completed', employee_count: 1,
+      finding_count: 0, high_count: 0, medium_count: 0, insufficient_data_count: 0 }} findings={[]}
+      overview={{ company_name: '虚构企业', summary: { coverage_rate: 1, affected_employee_count: 0,
+        requires_human_review_count: 0, deadline_30_count: 0, classification_pending: false }, categories: [],
+        material_coverage: { overall: 1, classification_pending: false, items: [] } }} />);
+    expect(screen.getByText(/评估范围尚未确认/)).toBeInTheDocument();
+    expect(screen.getByText(/无法确认工资、考勤项目是否已评估/)).toBeInTheDocument();
+  });
+  it('does not label an unknown workforce scope as zero coverage or inapplicable', () => {
+    render(<DashboardView summary={{ analysis_id: 'synthetic', status: 'partial', employee_count: 1,
+      finding_count: 0, high_count: 0, medium_count: 0, insufficient_data_count: 0 }} findings={[]}
+      overview={{ company_name: '虚构企业', summary: { coverage_rate: 0, affected_employee_count: 0,
+        requires_human_review_count: 0, deadline_30_count: 0, classification_pending: false }, categories: [],
+        material_coverage: { overall: 0, classification_pending: false, scope_pending: true,
+          items: [{ code: 'contract', label: '劳动合同', covered: 0, applicable: 0, rate: 0,
+            not_applicable: false, classification_pending: false, scope_pending: true }] } }} />);
+    expect(screen.getByText(/员工范围或在职状态尚未确认/)).toBeInTheDocument();
+    expect(screen.queryByText('0%')).not.toBeInTheDocument();
+    expect(screen.queryByText('不适用')).not.toBeInTheDocument();
+    expect(screen.getByText('适用范围待确认')).toBeInTheDocument();
+  });
   it('renders processing states in Chinese business language', () => {
     render(<ProcessingPanel status="extracting" progress={58} />);
     expect(screen.getByRole('heading', { name: '正在分析企业材料' })).toBeInTheDocument();

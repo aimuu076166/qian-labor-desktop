@@ -37,6 +37,45 @@ function candidate(overrides: Partial<MatchCandidate> = {}): MatchCandidate {
 }
 
 describe('MatchingReview', () => {
+  it('requires explicit stable record selection and submits its version without name merging', async () => {
+    const onDecision = vi.fn(async () => undefined);
+    render(<MatchingReview candidates={[candidate()]} currentCompanyId="company" employeeRecordOptions={[{
+      id: 'record', company_id: 'company', masked_name: '合成员**', employee_number: 'SYN-1', department: null,
+      job_title: null, lifecycle_status: 'active', version: 7, created_at: '2026-09-01',
+    }]} onDecision={onDecision} />);
+    expect(screen.getByLabelText('归属员工')).toHaveValue('');
+    expect(screen.getByRole('button', { name: '确认归属' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('归属员工'), { target: { value: 'record' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认归属' }));
+    expect(onDecision).toHaveBeenCalledWith(expect.objectContaining({ employee_record_id: 'record', expected_record_version: 7 }));
+    expect(screen.queryByRole('button', { name: '合并重复员工' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '新建员工并归属' })).toBeInTheDocument();
+  });
+  it('keeps manual input when the same candidate is refreshed', () => {
+    const onDecision = vi.fn();
+    const view = render(<MatchingReview candidates={[candidate()]} onDecision={onDecision} />);
+    fireEvent.change(screen.getByLabelText('新建人员显示名'), { target: { value: '人工确认名称' } });
+    fireEvent.change(screen.getByLabelText('确认工号（可选）'), { target: { value: 'SYN-010' } });
+    view.rerender(<MatchingReview candidates={[candidate({ score: 0.73 })]} onDecision={onDecision} />);
+    expect(screen.getByLabelText('新建人员显示名')).toHaveValue('人工确认名称');
+    expect(screen.getByLabelText('确认工号（可选）')).toHaveValue('SYN-010');
+    view.rerender(<MatchingReview candidates={[candidate({ id: 'candidate-two' })]} onDecision={onDecision} />);
+    expect(screen.getByLabelText('新建人员显示名')).toHaveValue('');
+  });
+  it('lets the user confirm a suggested employee number before creating a person', async () => {
+    const onDecision = vi.fn(async () => undefined);
+    render(<MatchingReview candidates={[candidate({ employee_id: null,
+      employee_number: null, employee_options: [],
+      extracted_fields: { employee_ids: ['SYN-010'], fact_ids: ['fact-one'] },
+    })]} onDecision={onDecision} />);
+    expect(screen.getByLabelText('确认工号（可选）')).toHaveValue('SYN-010');
+    fireEvent.change(screen.getByLabelText('新建人员显示名'), { target: { value: '虚构人员' } });
+    fireEvent.change(screen.getByLabelText('确认工号（可选）'), { target: { value: 'SYN-009' } });
+    fireEvent.click(screen.getByRole('button', { name: '创建未识别员工' }));
+    await waitFor(() => expect(onDecision).toHaveBeenCalledWith({ candidate_id: 'candidate-one',
+      decision: 'create_unknown', display_name: '虚构人员', employee_number: 'SYN-009',
+      fact_ids: ['fact-one'] }));
+  });
   it('creates a new unknown employee for facts without a safe existing match', async () => {
     const onDecision = vi.fn(async () => undefined);
     render(

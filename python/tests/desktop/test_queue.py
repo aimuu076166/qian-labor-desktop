@@ -106,3 +106,19 @@ def test_already_completed_future_cannot_deadlock_submit(monkeypatch: pytest.Mon
 
     assert thread.is_alive() is False
     assert result["analysis_id"] == "instant-analysis"
+
+
+def test_immediate_worker_can_read_submission_reservation_without_deadlock(monkeypatch):
+    monkeypatch.setattr("qian_labor.desktop.queue.ThreadPoolExecutor", ImmediateExecutor)
+    seen = []
+    class InspectingPipeline:
+        def process(self, analysis_id):
+            seen.append(queue.active_analysis_id)
+            return {"analysis_id": analysis_id, "status": "completed"}
+    queue = DesktopProcessingQueue(InspectingPipeline)
+    thread = threading.Thread(target=lambda: queue.submit("instant-inspected"), daemon=True)
+    thread.start()
+    thread.join(timeout=0.5)
+    assert not thread.is_alive()
+    assert seen == ["instant-inspected"]
+    assert not queue.is_busy

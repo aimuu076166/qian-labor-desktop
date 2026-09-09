@@ -68,13 +68,15 @@ def test_excel_cells_are_grouped_by_sheet_and_row() -> None:
     assert extracted.facts[0].source.excerpt == "QA-907 | false"
 
 
-def test_pipeline_persists_parser_coordinates_instead_of_model_coordinates(tmp_path: Path) -> None:
-    class WrongRowProvider:
+def test_pipeline_locates_actual_quote_without_trusting_provider_filename(tmp_path: Path) -> None:
+    class ActualQuoteProvider:
         name = "source-binding-test"
         is_external = False
 
         def extract(self, filename: str, content: bytes) -> ExtractionResult:
-            return result()
+            extracted = result()
+            extracted.facts[0].source = SourceLocator(file_name="invented.csv", excerpt="QA-907 | false")
+            return extracted
 
     token = "synthetic-source-binding-token"
     headers = {"X-Qian-Desktop-Token": token}
@@ -88,9 +90,10 @@ def test_pipeline_persists_parser_coordinates_instead_of_model_coordinates(tmp_p
         assert client.post(f"/api/analyses/{analysis_id}/import-paths", headers=headers,
                            json={"paths": [str(source)]}).status_code == 200
         ProcessingPipeline(app.state.database, LocalStorage(str(app.state.storage_root)),
-                           WrongRowProvider()).process(analysis_id)
+                           ActualQuoteProvider()).process(analysis_id)
         with app.state.database.session() as session:
             stored = session.scalar(select(StoredSource).where(StoredSource.analysis_id == analysis_id))
             assert stored is not None
-            assert stored.location == {"sheet": "CSV", "row": 2}
+            assert stored.location == {"sheet": "CSV", "row": 2, "_grounding": {
+                "version": "parser-grounding-v1", "status": "locally_located", "requires_review": False}}
             assert stored.excerpt == "QA-907 | false"

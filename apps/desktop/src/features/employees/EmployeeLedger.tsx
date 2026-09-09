@@ -1,4 +1,8 @@
+import type { ReactNode } from 'react';
+import type { AssessmentRevision, AssessmentScope } from '../../lib/api';
 import type { DashboardFinding } from '../dashboard/DashboardView';
+import { AssessmentScopeNotice } from '../scope/AssessmentScopeNotice';
+import { AssessmentRevisionStatus } from './AssessmentRevisionStatus';
 
 export type EmployeeLedgerItem = {
   id: string;
@@ -15,6 +19,8 @@ export type EmployeeLedgerItem = {
 };
 
 export type EmployeeLedgerPayload = {
+  assessment_scope?: AssessmentScope;
+  assessment_revision?: AssessmentRevision;
   items: EmployeeLedgerItem[];
   total: number;
   page: number;
@@ -37,6 +43,8 @@ export type EmployeeFinding = DashboardFinding & {
 };
 
 export type EmployeeDetailPayload = {
+  assessment_scope?: AssessmentScope;
+  assessment_revision?: AssessmentRevision;
   employee: Omit<
     EmployeeLedgerItem,
     | 'risk_counts'
@@ -45,6 +53,7 @@ export type EmployeeDetailPayload = {
     | 'material_coverage'
   >;
   findings: EmployeeFinding[];
+  retired_findings?: EmployeeFinding[];
 };
 
 const EMPLOYMENT_STATUS_LABELS: Record<string, string> = {
@@ -57,10 +66,14 @@ export function EmployeeLedger({
   payload,
   onSelectEmployee,
   onBack,
+  controls,
+  busy = false,
 }: {
   payload: EmployeeLedgerPayload;
   onSelectEmployee: (employeeId: string) => void;
   onBack: () => void;
+  controls?: ReactNode;
+  busy?: boolean;
 }) {
   return (
     <section className="employee-ledger" aria-labelledby="employee-ledger-title">
@@ -72,6 +85,9 @@ export function EmployeeLedger({
         </div>
         <button type="button" className="secondary-action" onClick={onBack}>返回风险概览</button>
       </div>
+      <AssessmentScopeNotice scope={payload.assessment_scope} />
+      <AssessmentRevisionStatus revision={payload.assessment_revision} />
+      {controls}
       {payload.items.length ? (
         <div className="table-scroll">
           <table className="employee-table">
@@ -88,13 +104,14 @@ export function EmployeeLedger({
                   <td>{EMPLOYMENT_STATUS_LABELS[item.employment_status] ?? item.employment_status}</td>
                   <td>高 {item.risk_counts.high} · 中 {item.risk_counts.medium}</td>
                   <td>不足 {item.insufficient_data_count} · 复核 {item.requires_human_review_count}</td>
-                  <td>{Math.round(item.material_coverage * 100)}%</td>
+                  <td>{item.employment_status === 'unknown' ? '待确认' : `${Math.round(item.material_coverage * 100)}%`}</td>
                   <td>
                     <button
                       type="button"
                       className="text-action"
                       aria-label={`查看${item.masked_name}详情`}
                       onClick={() => onSelectEmployee(item.id)}
+                      disabled={busy}
                     >查看详情</button>
                   </td>
                 </tr>
@@ -126,6 +143,8 @@ export function EmployeeDetail({
         </div>
         <button type="button" className="secondary-action" onClick={onBack}>返回员工台账</button>
       </div>
+      <AssessmentScopeNotice scope={payload.assessment_scope} />
+      <AssessmentRevisionStatus revision={payload.assessment_revision} />
       <div className="finding-list" aria-label="员工风险与资料事项">
         {payload.findings.length ? payload.findings.map((finding) => (
           <button type="button" className="finding-row" key={finding.id} onClick={() => onSelectFinding(finding.id)}>
@@ -137,6 +156,12 @@ export function EmployeeDetail({
           </button>
         )) : <p className="empty-state">该员工暂无可列示事项。</p>}
       </div>
+      {payload.retired_findings?.length ? <section aria-label="历史事项">
+        <h3>历史事项（不计入当前统计）</h3>
+        <p>退出当前结果不代表风险已解决，原有复核记录仍可查阅。</p>
+        {payload.retired_findings.map(item => <button type="button" className="finding-row" key={item.id}
+          onClick={() => onSelectFinding(item.id)}><strong>{item.title}</strong><span>查看历史复核</span></button>)}
+      </section> : null}
     </section>
   );
 }

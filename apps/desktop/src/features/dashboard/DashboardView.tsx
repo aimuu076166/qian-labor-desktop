@@ -1,3 +1,7 @@
+import type { AssessmentRevision, AssessmentScope } from '../../lib/api';
+import { AssessmentScopeNotice } from '../scope/AssessmentScopeNotice';
+import { AssessmentRevisionStatus } from '../employees/AssessmentRevisionStatus';
+
 export type DashboardSummary = {
   analysis_id: string;
   status: string;
@@ -19,6 +23,8 @@ export type DashboardFinding = {
 
 export type DashboardOverview = {
   company_name: string;
+  assessment_scope?: AssessmentScope;
+  assessment_revision?: AssessmentRevision;
   summary: {
     coverage_rate: number;
     affected_employee_count: number;
@@ -30,6 +36,7 @@ export type DashboardOverview = {
   material_coverage: {
     overall: number;
     classification_pending: boolean;
+    scope_pending?: boolean;
     items: Array<{
       code: string;
       label: string;
@@ -38,6 +45,7 @@ export type DashboardOverview = {
       rate: number;
       not_applicable: boolean;
       classification_pending: boolean;
+      scope_pending?: boolean;
     }>;
   };
 };
@@ -52,6 +60,7 @@ type DashboardViewProps = {
   onDeleteAnalysis?: () => void;
   onSelectMaterials?: () => void;
   selectingMaterials?: boolean;
+  hasCurrentAnalysis?: boolean;
 };
 
 const ASSESSMENT_LABELS: Record<string, string> = {
@@ -77,6 +86,7 @@ export function DashboardView({
   onDeleteAnalysis,
   onSelectMaterials,
   selectingMaterials = false,
+  hasCurrentAnalysis = false,
 }: DashboardViewProps) {
   return (
     <section className="dashboard-view" aria-labelledby="dashboard-title">
@@ -111,8 +121,9 @@ export function DashboardView({
 
       {!summary ? (
         <div className="dashboard-empty-state">
-          <h3>尚未导入企业材料</h3>
-          <p className="muted">选择 Word、Excel、PDF、图片或扫描件后开始本机风险体检。</p>
+          <h3>{hasCurrentAnalysis ? '当前体检尚无可展示的分析结果' : '尚未导入企业材料'}</h3>
+          <p className="muted">{hasCurrentAnalysis ? '可查看当前材料、补充材料或重新分析；暂无结果不代表无风险。'
+            : '选择 Word、Excel、PDF、图片或扫描件后开始本机风险体检。'}</p>
         </div>
       ) : (
         <>
@@ -141,7 +152,7 @@ export function DashboardView({
               <>
                 <article className="metric-card">
                   <span>材料覆盖率</span>
-                  <strong>{Math.round(overview.summary.coverage_rate * 100)}%</strong>
+                  <strong>{overview.material_coverage.scope_pending ? '待确认' : `${Math.round(overview.summary.coverage_rate * 100)}%`}</strong>
                 </article>
                 <article className="metric-card">
                   <span>受影响员工</span>
@@ -155,10 +166,16 @@ export function DashboardView({
             ) : null}
           </div>
 
+          <AssessmentScopeNotice scope={overview?.assessment_scope} />
+          <AssessmentRevisionStatus revision={overview?.assessment_revision} />
+
           {overview ? (
             <div className="dashboard-breakdown">
               <section aria-labelledby="coverage-title">
                 <h3 id="coverage-title">材料覆盖情况</h3>
+                {overview.material_coverage.scope_pending ? (
+                  <p className="inline-warning">员工范围或在职状态尚未确认，暂不能判断材料适用范围与整体覆盖率。</p>
+                ) : null}
                 {overview.material_coverage.classification_pending ? (
                   <p className="inline-warning">仍有材料类型待确认，覆盖率仅供人工复核。</p>
                 ) : null}
@@ -167,7 +184,9 @@ export function DashboardView({
                     <div className="coverage-row" key={item.code}>
                       <span>{item.label}</span>
                       <strong>
-                        {item.not_applicable
+                        {item.scope_pending
+                          ? '适用范围待确认'
+                          : item.not_applicable
                           ? '不适用'
                           : `${item.covered}/${item.applicable}（${Math.round(item.rate * 100)}%）`}
                       </strong>

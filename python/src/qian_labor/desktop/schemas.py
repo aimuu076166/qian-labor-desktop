@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class HealthResponse(BaseModel):
@@ -18,6 +18,17 @@ class CreateAnalysisRequest(BaseModel):
     company_display_name: str = Field(default="", max_length=200)
 
 
+class AssessmentScope(BaseModel):
+    identifier: Literal["legacy_full_v1", "labor_materials_v1"]
+    display_label: str
+    excluded_rule_codes: list[str]
+    excluded_rule_ids: list[str]
+    not_evaluated_reasons: dict[str, str]
+    payroll_evaluated: bool
+    attendance_evaluated: bool
+    settlement_document_label: str
+
+
 class ImportPathsRequest(BaseModel):
     paths: list[str] = Field(min_length=1, max_length=100)
 
@@ -27,9 +38,12 @@ class MatchDecisionRequest(BaseModel):
     decision: Literal["assign", "create_unknown", "merge", "unmatched"]
     employee_id: str | None = Field(default=None, max_length=36)
     display_name: str | None = Field(default=None, max_length=100)
+    employee_number: str | None = Field(default=None, max_length=80)
     source_employee_id: str | None = Field(default=None, max_length=36)
     target_employee_id: str | None = Field(default=None, max_length=36)
     fact_ids: list[str] = Field(default_factory=list, max_length=500)
+    employee_record_id: str | None = Field(default=None, min_length=1, max_length=36)
+    expected_record_version: int | None = Field(default=None, ge=0, strict=True)
 
 
 class DashboardSummary(BaseModel):
@@ -58,3 +72,11 @@ class FindingSource(BaseModel):
     locator_type: str
     location: dict[str, Any]
     excerpt: str
+
+
+class FindingReviewRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    expected_version: int = Field(ge=0, strict=True)
+    status: Literal["reviewed", "dismissed", "not_applicable", "needs_material", "open"]
+    note: str = Field(min_length=1, max_length=500)

@@ -7,18 +7,21 @@ import os
 import queue
 import secrets
 import signal
+import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from contextlib import closing
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import httpx
 from docx import Document
 
 from qian_labor.rules.catalog import RULE_IDS
+from qian_labor.rules.registry import RULE_REGISTRY
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,7 +59,7 @@ class RunningSidecar:
     launch_token: str
 
 
-def _write_fixture(path: Path) -> None:
+def _fixture_text() -> str:
     payload = {
         "synthetic_marker": "QIAN_DEMO_20260824",
         "document_type": "contract",
@@ -72,10 +75,14 @@ def _write_fixture(path: Path) -> None:
             "analysis.minimum_core_coverage": 0.4,
         },
     }
+    return "QIAN_SYNTHETIC_JSON=" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _write_fixture(path: Path) -> None:
     document = Document()
     document.add_heading("完全虚构桌面验收材料", level=1)
     document.add_paragraph(
-        "QIAN_SYNTHETIC_JSON=" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        _fixture_text()
     )
     document.save(path)
 
@@ -247,6 +254,125 @@ def _assert_status(response: httpx.Response, expected: int, code: str) -> None:
         raise VerificationError(code)
 
 
+def _source_bindings(data_dir: Path) -> dict[str, dict[str, Any]]:
+    # All fixture facts share paragraph 2, so filename/location alone cannot detect a
+    # wrong-fact citation. Check the persisted links read-only as well.
+    try:
+        with closing(sqlite3.connect((data_dir / "qian-labor.db").as_uri() + "?mode=ro", uri=True)) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute("""
+                SELECT s.id, s.analysis_id AS source_analysis_id, s.file_id,
+                       s.locator_type, s.location, s.excerpt,
+                       f.analysis_id AS fact_analysis_id, f.employee_id,
+                       f.file_id AS fact_file_id, f.fact_type, f.normalized_value_json,
+                       u.analysis_id AS file_analysis_id, u.original_filename AS file_name,
+                       u.classified_kind, f.verification_status, a.assessment_profile
+                FROM source_locators s
+                JOIN employment_facts f ON f.id = s.fact_id
+                JOIN uploaded_files u ON u.id = s.file_id
+                JOIN analysis_batches a ON a.id = f.analysis_id
+            """).fetchall()
+            bindings = {}
+            for row in rows:
+                binding = dict(row)
+                binding["location"] = json.loads(binding["location"])
+                raw_value = binding.pop("normalized_value_json")
+                # SQLite JSON columns have numeric affinity: 0.4 can already be
+                # a Python float, while JSON strings/booleans remain encoded text.
+                binding["value"] = json.loads(raw_value) if isinstance(raw_value, str) else raw_value
+                bindings[binding["id"]] = binding
+            return bindings
+    except (sqlite3.Error, ValueError) as error:
+        raise VerificationError("SOURCE_BINDING_READ_FAILED") from error
+
+
+def _verify_source_trace(
+    details: Sequence[dict[str, Any]], bindings: dict[str, dict[str, Any]], *,
+    analysis_id: str, employee_id: str, fixture_file_id: str, fixture_name: str,
+    assessment_profile: str = "legacy_full_v1",
+    fixture_excerpt: str | None = None,
+) -> str:
+    if assessment_profile not in {"legacy_full_v1", "labor_materials_v1"}:
+        raise VerificationError("SOURCE_TRACE_INVALID")
+    required_by_rule = {rule.metadata.rule_id: set(rule.metadata.required_facts)
+                        for rule in RULE_REGISTRY.values()}
+    expected_r01 = []
+    # Independent fixture oracle; never use the production grounder to validate itself.
+    expected_excerpt = fixture_excerpt if fixture_excerpt is not None else _fixture_text()
+    public_location = {"paragraph": 2}
+    stored_location = {"paragraph": 2, "_grounding": {
+        "version": "parser-grounding-v1", "status": "locally_located", "requires_review": False,
+    }}
+    for detail in details:
+        sources = detail.get("sources", [])
+        required = required_by_rule.get(detail.get("rule_id"))
+        derived_coverage = assessment_profile == "labor_materials_v1" and detail.get("rule_id") == "MATERIAL_COVERAGE_LOW"
+        if derived_coverage:
+            # This harness imports one synthetic contract containing the active
+            # status and explicit missing-contract fact. Those exact two fields
+            # determine its scoped coverage. Never accept arbitrary same-file
+            # citations, model percentages, or unrelated review flags instead.
+            required = {"employment.status", "employment.contract.exists"}
+        if required is None or not isinstance(sources, list):
+            raise VerificationError("SOURCE_TRACE_INVALID")
+        positive = detail.get("assessment_status") != "insufficient_data"
+        if positive and not sources:
+            raise VerificationError("SOURCE_TRACE_MISSING")
+        contributing = {}
+        for source in sources:
+            binding = bindings.get(source.get("id"))
+            if derived_coverage and (binding is None
+                    or binding.get("assessment_profile") != assessment_profile
+                    or binding.get("classified_kind") != "contract"
+                    or binding.get("verification_status") in {"conflicted", "pending_review", "needs_human_confirmation"}):
+                raise VerificationError("SOURCE_TRACE_INVALID")
+            if (binding is None or binding["fact_type"] not in required
+                    or any(binding[key] != analysis_id for key in
+                           ("source_analysis_id", "fact_analysis_id", "file_analysis_id"))
+                    or binding["employee_id"] != employee_id
+                    or binding["fact_file_id"] != fixture_file_id
+                    or any(source.get(key) != expected or binding[key] != expected
+                           for key, expected in {
+                               "file_id": fixture_file_id, "file_name": fixture_name,
+                               "locator_type": "paragraph", "excerpt": expected_excerpt,
+                           }.items())
+                    or source.get("location") != public_location
+                    or source.get("provenance") != "locally_located"
+                    or binding["location"] != stored_location):
+                raise VerificationError("SOURCE_TRACE_INVALID")
+            contributing[binding["fact_type"]] = binding["value"]
+        if (positive or derived_coverage) and set(contributing) != required:
+            raise VerificationError("SOURCE_TRACE_INVALID")
+        if derived_coverage and (detail.get("assessment_status") != "insufficient_data"
+                or contributing.get("employment.status") != "active"
+                or contributing.get("employment.contract.exists") is not False):
+            raise VerificationError("SOURCE_TRACE_INVALID")
+        if detail.get("rule_id") == "CONTRACT_MISSING_ACTIVE":
+            if (detail.get("assessment_status") != "suspected_risk"
+                    or contributing.get("employment.status") != "active"
+                    or contributing.get("employment.contract.exists") is not False):
+                raise VerificationError("EXPECTED_R01_INVALID")
+            expected_r01.append(str(detail["id"]))
+    if len(expected_r01) != 1:
+        raise VerificationError("EXPECTED_R01_MISSING")
+    return expected_r01[0]
+
+
+def _verify_report_sources(
+    report_findings: Sequence[dict[str, Any]], details: Sequence[dict[str, Any]],
+) -> None:
+    verified = {item["id"]: item for item in details}
+    if len(report_findings) != len(verified) or {item["id"] for item in report_findings} != set(verified):
+        raise VerificationError("REPORT_INCONSISTENT")
+    for item in report_findings:
+        detail = verified[item["id"]]
+        expected = [{key: source[key] for key in ("file_name", "locator_type", "location", "excerpt", "provenance")}
+                    for source in detail["sources"]]
+        if (item.get("sources") != expected or item.get("rule_id") != detail["rule_id"]
+                or item.get("assessment_status") != detail["assessment_status"]):
+            raise VerificationError("REPORT_INCONSISTENT")
+
+
 def verify_command(
     command: Sequence[str],
     *,
@@ -334,11 +460,19 @@ def verify_command(
                 findings = dashboard.json().get("findings", [])
                 if not findings:
                     raise VerificationError("FINDING_MISSING")
-                finding_id = str(findings[0]["id"])
-                finding = client.get(f"/api/findings/{finding_id}")
-                _assert_status(finding, 200, "FINDING_DETAIL_FAILED")
-                if not finding.json().get("sources"):
-                    raise VerificationError("SOURCE_TRACE_MISSING")
+                details = []
+                for item in findings:
+                    finding = client.get(f"/api/findings/{item['id']}")
+                    _assert_status(finding, 200, "FINDING_DETAIL_FAILED")
+                    details.append(finding.json())
+                finding_id = _verify_source_trace(
+                    details, _source_bindings(data_dir), analysis_id=analysis_id,
+                    employee_id=str(candidate["employee_id"]),
+                    fixture_file_id=str(imported.json()["files"][0]["id"]),
+                    fixture_name=fixture.name,
+                    assessment_profile=created.json().get("assessment_scope", {}).get("identifier"),
+                    fixture_excerpt=Document(fixture).paragraphs[1].text,
+                )
                 ledger = client.get(f"/api/analyses/{analysis_id}/employees")
                 _assert_status(ledger, 200, "EMPLOYEE_LEDGER_FAILED")
                 ledger_payload = ledger.json()
@@ -358,9 +492,9 @@ def verify_command(
                     report_payload.get("summary", {}).get("employee_count")
                     != dashboard.json().get("summary", {}).get("employee_count")
                     or len(report_payload.get("employees", [])) != ledger_payload.get("total")
-                    or not any(item.get("sources") for item in report_payload.get("findings", []))
                 ):
                     raise VerificationError("REPORT_INCONSISTENT")
+                _verify_report_sources(report_payload.get("findings", []), details)
 
             _stop_sidecar(running)
             stopped_processes += 1

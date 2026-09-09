@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import Event
 
 from fastapi.testclient import TestClient
 
@@ -75,21 +76,21 @@ def test_analysis_is_committed_as_queued_before_the_worker_can_start(tmp_path: P
         )
         assert imported.status_code == 200
 
-        def observe_submit(submitted_id: str) -> dict[str, object]:
-            with app.state.database.session() as session:
-                analysis = session.get(AnalysisBatch, submitted_id)
-                assert analysis is not None
-                observed_statuses.append(analysis.status)
-            return {
-                "analysis_id": submitted_id,
-                "status": "queued",
-                "queue_mode": "desktop",
-            }
+        observed = Event()
+        class ObservingPipeline:
+            def process(self, submitted_id: str) -> dict[str, object]:
+                with app.state.database.session() as session:
+                    analysis = session.get(AnalysisBatch, submitted_id)
+                    assert analysis is not None
+                    observed_statuses.append(analysis.status)
+                observed.set()
+                return {"analysis_id": submitted_id, "status": "completed"}
 
-        app.state.processing_queue.submit = observe_submit
+        app.state.processing_queue.pipeline_factory = ObservingPipeline
         submitted = client.post(f"/api/analyses/{analysis_id}/process", headers=HEADERS)
 
         assert submitted.status_code == 202
+        assert observed.wait(2)
         assert observed_statuses == ["queued"]
 
 
@@ -111,17 +112,24 @@ def test_busy_queue_restores_the_analysis_state(tmp_path: Path) -> None:
         )
         assert imported.status_code == 200
 
-        def reject_submit(_submitted_id: str) -> dict[str, object]:
-            raise RuntimeError("DESKTOP_ANALYSIS_BUSY")
-
-        app.state.processing_queue.submit = reject_submit
-        submitted = client.post(f"/api/analyses/{analysis_id}/process", headers=HEADERS)
-
-        assert submitted.status_code == 409
-        with app.state.database.session() as session:
-            analysis = session.get(AnalysisBatch, analysis_id)
-            assert analysis is not None
-            assert analysis.status == "uploading"
+        started, release = Event(), Event()
+        class OccupiedPipeline:
+            def process(self, _submitted_id: str) -> dict[str, object]:
+                started.set()
+                assert release.wait(5)
+                return {"status": "completed"}
+        app.state.processing_queue.pipeline_factory = OccupiedPipeline
+        app.state.processing_queue.submit("another-synthetic-analysis")
+        try:
+            assert started.wait(2)
+            submitted = client.post(f"/api/analyses/{analysis_id}/process", headers=HEADERS)
+            assert submitted.status_code == 409
+            with app.state.database.session() as session:
+                analysis = session.get(AnalysisBatch, analysis_id)
+                assert analysis is not None
+                assert analysis.status == "uploading"
+        finally:
+            release.set()
 
 
 def test_analysis_endpoints_remain_launch_token_protected(tmp_path: Path) -> None:

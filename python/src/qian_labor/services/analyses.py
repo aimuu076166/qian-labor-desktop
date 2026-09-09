@@ -5,6 +5,7 @@ from typing import Any
 from qian_labor.database import Database
 from qian_labor.domain.enums import ALLOWED_TRANSITIONS, AnalysisStatus
 from qian_labor.models.core import AnalysisBatch
+from qian_labor.services.assessment_scope import LEGACY_PROFILE, scope_payload, validate_profile
 
 
 class InvalidAnalysisTransition(Exception):
@@ -23,12 +24,14 @@ class AnalysisService:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    def create(self, name: str, company_display_name: str, is_demo: bool = False) -> AnalysisBatch:
+    def create(self, name: str, company_display_name: str, is_demo: bool = False, *, assessment_profile: str = LEGACY_PROFILE) -> AnalysisBatch:
+        validate_profile(assessment_profile)
         with self.database.session() as session:
             item = AnalysisBatch(
                 name=name.strip(),
                 company_display_name=company_display_name.strip(),
                 is_demo=is_demo,
+                assessment_profile=assessment_profile,
             )
             session.add(item)
             session.commit()
@@ -40,6 +43,7 @@ class AnalysisService:
             item = session.get(AnalysisBatch, analysis_id)
             if item is None:
                 raise KeyError(analysis_id)
+            validate_profile(item.assessment_profile)
             session.expunge(item)
             return item
 
@@ -62,6 +66,7 @@ class AnalysisService:
     def payload(item: AnalysisBatch) -> dict[str, Any]:
         return {
             "id": item.id,
+            "assessment_scope": scope_payload(item.assessment_profile),
             "name": item.name,
             "company_display_name": item.company_display_name,
             "status": item.status,

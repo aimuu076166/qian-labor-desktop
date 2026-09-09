@@ -1,0 +1,263 @@
+{
+  "request": {
+    "analysis_id": "51c80dad-3178-4bc6-9fa1-9529744ff51d",
+    "company_id": "3e927f83-6cca-4153-98e5-1be3cbf25141",
+    "expected_context_signature": "3b0a30196c970fe9152de478cf21ad318e2b181010bd16ae12c1695df74febd8",
+    "expected_input_revision": "9de0d10afd000ed8c3ffa301acdeface239e83a83937a6922783ad69db348b9d",
+    "expected_result_revision": null,
+    "expected_review_revision": "797e3dc8a48bf4fe78ba892d5e966be12cef8bef05dc91043d6421768de0b5c0",
+    "request_id": "2104b157-687b-4c35-973e-b944d437a73b",
+    "outcome": "accepted",
+    "error_code": null,
+    "version_id": "c14a17eb-1fce-4b67-a608-e5b236e3ab7c",
+    "content_sha256": "4a65bbcba3ddd52e5d179a337d901c250d23d0f856f8ab15abc1a69868490146"
+  },
+  "snapshot": {
+    "id": "c14a17eb-1fce-4b67-a608-e5b236e3ab7c",
+    "company_id": "3e927f83-6cca-4153-98e5-1be3cbf25141",
+    "analysis_id": "51c80dad-3178-4bc6-9fa1-9529744ff51d",
+    "version": 1,
+    "created_at": "2026-09-08T23:37:26.124722+00:00",
+    "content_sha256": "4a65bbcba3ddd52e5d179a337d901c250d23d0f856f8ab15abc1a69868490146",
+    "input_revision": "9de0d10afd000ed8c3ffa301acdeface239e83a83937a6922783ad69db348b9d",
+    "result_revision": null,
+    "review_revision": "797e3dc8a48bf4fe78ba892d5e966be12cef8bef05dc91043d6421768de0b5c0",
+    "context_signature": "3b0a30196c970fe9152de478cf21ad318e2b181010bd16ae12c1695df74febd8",
+    "payload": {
+      "advisories": [
+        {
+          "assignment_status": "pending_matching",
+          "checks": [
+            "核对合成条款"
+          ],
+          "employee_id": null,
+          "file_id": "65acb931-aca1-43c4-bda9-96b8604a5c65",
+          "filename": "synthetic-location.xlsx",
+          "handling": null,
+          "id": "ec1e0493-65f5-4123-8dc4-8bd824e8e2d3",
+          "is_latest": true,
+          "issue": "合成条款待核对",
+          "legal_verification": "unverified",
+          "match_candidate_id": null,
+          "next_action": "人工复核",
+          "read_only": true,
+          "requires_source_review": true,
+          "run_id": "ba7490bb-c290-42b7-a6fa-d201a3da7751",
+          "source": {
+            "excerpt": "合成条款",
+            "location": {
+              "column": "合成列139****9000",
+              "row": 2,
+              "sheet": "合成联系人138****8000"
+            },
+            "locator_type": "document",
+            "provenance": "locally_located"
+          },
+          "unverified_references": [],
+          "version": 0
+        }
+      ],
+      "advisory_runs": [
+        {
+          "contract_version": "contract-advisory-v1",
+          "execution_status": "completed",
+          "file_id": "65acb931-aca1-43c4-bda9-96b8604a5c65",
+          "id": "ba7490bb-c290-42b7-a6fa-d201a3da7751",
+          "input_statuses": [
+            "completed"
+          ]
+        }
+      ],
+      "analysis_id": "51c80dad-3178-4bc6-9fa1-9529744ff51d",
+      "assessment_revision": {
+        "availability": "available",
+        "check_date": "2026-09-09",
+        "check_date_explicit": false,
+        "completeness": "complete",
+        "evaluated_at": null,
+        "evaluated_input_revision": null,
+        "fresh": false,
+        "input_revision": "9de0d10afd000ed8c3ffa301acdeface239e83a83937a6922783ad69db348b9d",
+        "read_only": true,
+        "report_review_revision": "797e3dc8a48bf4fe78ba892d5e966be12cef8bef05dc91043d6421768de0b5c0",
+        "result_revision": null
+      },
+      "assessment_scope": {
+        "attendance_evaluated": false,
+        "display_label": "用工材料体检 v1",
+        "excluded_rule_codes": [
+          "R09",
+          "R13",
+          "R14",
+          "R15"
+        ],
+        "excluded_rule_ids": [
+          "PAY_CONTRACT_ACTUAL_MISMATCH",
+          "OVERTIME_WITHOUT_PAY_EVIDENCE",
+          "ATTENDANCE_PAYROLL_MISMATCH",
+          "ACTIVE_WITHOUT_ATTENDANCE_RECORD"
+        ],
+        "identifier": "labor_materials_v1",
+        "not_evaluated_reasons": {
+          "R16": "现有离职后记录为工资、考勤、社保合并事实，无法核实社保延续来源，本项暂未评估。"
+        },
+        "payroll_evaluated": false,
+        "settlement_document_label": "结算文件（final_pay），不要求工资表，不计算工资或补偿"
+      },
+      "canonical_employees": [],
+      "categories": [],
+      "company": {
+        "display_name": "合成隐私企业",
+        "id": "3e927f83-6cca-4153-98e5-1be3cbf25141",
+        "version": 0
+      },
+      "company_name": "合成隐私企业",
+      "dataset_label": "本地资料（不代表已调用真实模型）",
+      "departments": [],
+      "employees": [
+        {
+          "department": "未分组",
+          "employee_number": null,
+          "employment_status": "unknown",
+          "id": "46855a90-d2b8-461d-9aa0-d2d8fc24bdfd",
+          "insufficient_data_count": 0,
+          "job_title": null,
+          "masked_name": "合成**",
+          "match_status": "confirmed",
+          "material_coverage": 0,
+          "requires_human_review_count": 0,
+          "risk_counts": {
+            "high": 0,
+            "medium": 0
+          }
+        }
+      ],
+      "facts": [
+        {
+          "analysis_id": "51c80dad-3178-4bc6-9fa1-9529744ff51d",
+          "basis_pending": false,
+          "confirmation_context": "fact_owner_and_material",
+          "context_signature": "",
+          "effective_value": true,
+          "employee_id": "46855a90-d2b8-461d-9aa0-d2d8fc24bdfd",
+          "fact_type": "employment.contract.exists",
+          "file_id": "65acb931-aca1-43c4-bda9-96b8604a5c65",
+          "filename": "synthetic-location.xlsx",
+          "human_confirmed": false,
+          "id": "13800138-0000-4000-8000-000000000001",
+          "latest_revision": null,
+          "original_value": true,
+          "owner_signature": "c4297aab6886866e608e4d193d0d0d28ce20ada4fdbcf3f0faf9e30d4c4ce8e4",
+          "read_only": true,
+          "record_id": null,
+          "revision_valid": false,
+          "selected_support": true,
+          "source_signature": "e6681cc44c665cd4e4a3ef9c27c35d8406ca4bc009033df8ad24a819e9d0fd77",
+          "source_valid": true,
+          "sources": [
+            {
+              "excerpt": "合成条款",
+              "file_id": "65acb931-aca1-43c4-bda9-96b8604a5c65",
+              "id": "4432eb44-0aca-4f6b-b137-89a19aff79d6",
+              "location": {
+                "column": "合成列139****9000",
+                "row": 2,
+                "sheet": "合成联系人138****8000"
+              },
+              "locator_type": "spreadsheet",
+              "provenance": "locally_located"
+            }
+          ],
+          "value_spec": {
+            "editable": true,
+            "input_type": "boolean",
+            "max_items": 50,
+            "max_length": 200,
+            "nullable": true,
+            "options": []
+          },
+          "verification_status": "needs_human_confirmation",
+          "version": 0
+        }
+      ],
+      "findings": [],
+      "generated_at": "2026-09-08T23:37:26.124722+00:00",
+      "is_demo": false,
+      "limitations": [
+        "本报告为已保存的复核草稿，不构成无风险保证；模型建议未经核验且不计入确定性风险统计。",
+        "当前资料尚无同版本体检结果；须复核并显式重新体检。",
+        "存在待确认事实、当前合同依据或待核对来源。"
+      ],
+      "material_coverage": {
+        "classification_pending": true,
+        "items": [
+          {
+            "applicable": 0,
+            "classification_pending": false,
+            "code": "contract",
+            "covered": 0,
+            "label": "劳动合同",
+            "not_applicable": false,
+            "rate": 0.0,
+            "scope_pending": true,
+            "status": "scope_pending"
+          },
+          {
+            "applicable": 0,
+            "classification_pending": false,
+            "code": "social_insurance",
+            "covered": 0,
+            "label": "社保",
+            "not_applicable": false,
+            "rate": 0.0,
+            "scope_pending": true,
+            "status": "scope_pending"
+          },
+          {
+            "applicable": 0,
+            "classification_pending": false,
+            "code": "termination",
+            "covered": 0,
+            "label": "离职材料",
+            "not_applicable": false,
+            "rate": 0.0,
+            "scope_pending": true,
+            "status": "scope_pending"
+          }
+        ],
+        "overall": 0.0,
+        "scope_pending": true,
+        "status": "scope_pending",
+        "unknown_employee_count": 1
+      },
+      "materials": [
+        {
+          "error_code": null,
+          "filename": "synthetic-location.xlsx",
+          "id": "65acb931-aca1-43c4-bda9-96b8604a5c65",
+          "kind": "unknown",
+          "status": "processed"
+        }
+      ],
+      "ownership": {
+        "analysis_id": "51c80dad-3178-4bc6-9fa1-9529744ff51d",
+        "company_id": "3e927f83-6cca-4153-98e5-1be3cbf25141",
+        "role": "historical"
+      },
+      "report_status": "draft",
+      "status": "completed",
+      "summary": {
+        "affected_employee_count": 0,
+        "classification_pending": true,
+        "coverage_rate": 0.0,
+        "deadline_30_count": 0,
+        "employee_count": 1,
+        "high_count": 0,
+        "insufficient_data_count": 0,
+        "low_count": 0,
+        "medium_count": 0,
+        "requires_human_review_count": 0
+      }
+    }
+  }
+}

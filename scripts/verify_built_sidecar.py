@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -29,16 +30,35 @@ def _validate_binary(path: Path) -> None:
         raise VerificationError("BINARY_NOT_EXECUTABLE")
 
 
+def _verify_local_ocr(binary: Path, *, cwd: Path | None) -> str:
+    environment = os.environ.copy()
+    environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    try:
+        result = subprocess.run(
+            [str(binary), "--self-test-local-ocr"], env=environment, cwd=cwd,
+            capture_output=True, timeout=60, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise VerificationError("LOCAL_OCR_FAILED") from None
+    if result.returncode != 0 or result.stdout != b"LOCAL_OCR=PASS\n" or result.stderr:
+        raise VerificationError("LOCAL_OCR_FAILED")
+    return "LOCAL_OCR=PASS"
+
+
 def main() -> int:
     args = _parser().parse_args()
     try:
         _validate_binary(args.binary)
         binary = args.binary.resolve()
-        markers = verify_command(
+        working_directory = binary.parent if args.cwd_binary_dir else None
+        markers = []
+        if sys.platform == "darwin":
+            markers.append(_verify_local_ocr(binary, cwd=working_directory))
+        markers.extend(verify_command(
             [str(binary)],
-            cwd=binary.parent if args.cwd_binary_dir else None,
+            cwd=working_directory,
             windows_no_window=args.windows_no_window,
-        )
+        ))
     except VerificationError as error:
         print(f"BUILT_SIDECAR_VERIFY=FAIL:{error.code}", file=sys.stderr)
         return 1

@@ -9,10 +9,6 @@ import threading
 import time
 from pathlib import Path
 
-import uvicorn
-
-from qian_labor.desktop.app import create_desktop_app
-
 HOST = "127.0.0.1"
 READY_PREFIX = "QIAN_DESKTOP_READY="
 READY_FILE_ENV = "QIAN_DESKTOP_READY_FILE"
@@ -75,6 +71,23 @@ def _write_ready_file(path: Path, payload: bytes) -> None:
 
 
 def main() -> int:
+    if sys.argv[1:]:
+        if sys.argv[1:] != ["--self-test-local-ocr"]:
+            print("LOCAL_OCR=FAIL", flush=True)
+            return 1
+        from contextlib import redirect_stderr, redirect_stdout
+        import io
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                from qian_labor.desktop.ocr_self_test import run
+        except Exception:
+            print("LOCAL_OCR=FAIL", flush=True)
+            return 1
+        return run()
+
+    import uvicorn
+    from qian_labor.desktop.app import create_desktop_app
+
     data_dir = Path(_required_env("QIAN_DESKTOP_DATA_DIR")).expanduser().resolve()
     token = _required_env("QIAN_DESKTOP_TOKEN")
     ready_file = _configured_ready_file(data_dir)

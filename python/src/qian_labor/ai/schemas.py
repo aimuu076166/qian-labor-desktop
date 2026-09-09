@@ -1,8 +1,26 @@
 import json
 import math
-from typing import Any, Literal, cast
+from decimal import Decimal, InvalidOperation
+from typing import Annotated, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, field_validator
+from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, field_validator, model_validator
+
+
+def same_json_value(left: object, right: object) -> bool:
+    """Compare JSON values without Python's bool == number equivalence."""
+    if type(left) is bool or type(right) is bool:
+        return type(left) is type(right) and left is right
+    if type(left) in (int, float) and type(right) in (int, float):
+        return (not isinstance(left, float) or math.isfinite(left)) and (
+            not isinstance(right, float) or math.isfinite(right)
+        ) and left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, list):
+        return len(left) == len(right) and all(same_json_value(a, b) for a, b in zip(left, right))
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(same_json_value(value, right[key]) for key, value in left.items())
+    return (left is None or type(left) is str) and left == right
 
 
 class SourceLocator(BaseModel):
@@ -14,6 +32,9 @@ class SourceLocator(BaseModel):
     column: str | None = None
     sheet: str | None = None
     paragraph: int | None = None
+    table: int | None = None
+    cell: str | None = None
+    block: int | None = None
     excerpt: str = ""
     bbox: tuple[float, float, float, float] | None = None
 
@@ -35,6 +56,49 @@ class UsageRecord(BaseModel):
     estimated_cost_usd: float = 0.0
     latency_ms: int = 0
     attempts: int = 1
+
+
+ADVISORY_VERSION = "contract-advisory-v1"
+BoundedCheck = Annotated[str, Field(min_length=1, max_length=300)]
+
+
+class ClauseObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    employee_number: str | None = Field(default=None, max_length=80)
+    source: SourceLocator
+    issue: str = Field(min_length=1, max_length=1000)
+    checks: list[BoundedCheck] = Field(min_length=1, max_length=8)
+    next_action: str = Field(min_length=1, max_length=1000)
+    unverified_references: list[BoundedCheck] = Field(default_factory=list, max_length=5)
+
+    @field_validator("source")
+    @classmethod
+    def bounded_source(cls, value):
+        if len(value.excerpt) > 4000 or len(value.file_name) > 255:
+            raise ValueError("ADVISORY_SOURCE_INVALID")
+        return value
+
+    @field_validator("issue", "next_action")
+    @classmethod
+    def nonblank(cls, value):
+        if not value.strip():
+            raise ValueError("ADVISORY_TEXT_INVALID")
+        return value
+
+
+class ContractAdvisory(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    version: Literal["contract-advisory-v1"]
+    status: Literal["completed", "unreadable", "not_applicable"]
+    observations: list[ClauseObservation] = Field(max_length=30)
+
+    @model_validator(mode="after")
+    def observations_require_execution(self):
+        if self.status != "completed" and self.observations:
+            raise ValueError("ADVISORY_STATUS_INVALID")
+        return self
 
 
 class ExtractionResult(BaseModel):
@@ -74,11 +138,12 @@ class ExtractionResult(BaseModel):
     entities: dict[str, str] = Field(default_factory=dict)
     needs_human_confirmation: bool = False
     facts: list[EmploymentFact] = Field(default_factory=list)
+    contract_advisory: ContractAdvisory | None = None
     usage: UsageRecord = Field(default_factory=UsageRecord)
 
 
 class ProviderSource(BaseModel):
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, strict=True)
 
     file_name: str
     page: int | None
@@ -86,6 +151,7 @@ class ProviderSource(BaseModel):
     column: str | None
     sheet: str | None
     paragraph: int | None
+    table: int | None = None
     excerpt: str
     bbox: list[FiniteFloat] | None
 
@@ -121,7 +187,7 @@ ProviderValueType = Literal[
 
 
 class ProviderFact(BaseModel):
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, strict=True)
 
     employee_id: str | None
     fact_type: str
@@ -135,6 +201,17 @@ class ProviderFact(BaseModel):
     confidence: FiniteFloat = Field(ge=0, le=1)
     source: ProviderSource
     needs_human_confirmation: bool
+
+    @field_validator("value_number", mode="before")
+    @classmethod
+    def reject_lossy_integer_conversion(cls, value: object) -> object:
+        if type(value) is int:
+            try:
+                if not math.isfinite(float(value)) or float(value) != value:
+                    raise ValueError("PROVIDER_NUMBER_PRECISION_LOSS")
+            except OverflowError:
+                raise ValueError("PROVIDER_NUMBER_PRECISION_LOSS") from None
+        return value
 
     def to_employment_fact(self) -> EmploymentFact:
         values: dict[str, object | None] = {
@@ -193,10 +270,11 @@ class ProviderFact(BaseModel):
             if self.value_type == "integer":
                 return int(text) == selected
             if self.value_type == "number":
-                return math.isfinite(float(text)) and float(text) == selected
+                numeric = Decimal(text)
+                return numeric.is_finite() and numeric == Decimal(str(selected))
             if self.value_type in {"string_list", "json"}:
-                return json.loads(text) == selected
-        except (TypeError, ValueError, json.JSONDecodeError):
+                return same_json_value(json.loads(text), selected)
+        except (TypeError, ValueError, InvalidOperation, json.JSONDecodeError):
             return False
         return False
 
@@ -263,6 +341,7 @@ class ProviderExtractionResult(BaseModel):
     job_title: str | None
     needs_human_confirmation: bool
     facts: list[ProviderFact]
+    contract_advisory: ContractAdvisory | None = None
 
     def to_extraction_result(self) -> ExtractionResult:
         return ExtractionResult(
@@ -274,4 +353,5 @@ class ProviderExtractionResult(BaseModel):
             job_title=self.job_title,
             needs_human_confirmation=self.needs_human_confirmation,
             facts=[item.to_employment_fact() for item in self.facts],
+            contract_advisory=self.contract_advisory,
         )

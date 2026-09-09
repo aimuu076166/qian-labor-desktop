@@ -31,6 +31,7 @@
     "targets": "all",
     "externalBin": ["binaries/qian-sidecar"],
     "macOS": {
+      "minimumSystemVersion": "11.0",
       "signingIdentity": "-",
       "hardenedRuntime": false
     }

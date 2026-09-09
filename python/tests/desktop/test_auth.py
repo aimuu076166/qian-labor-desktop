@@ -14,6 +14,24 @@ PEPPER = "desktop-zhipu-runtime-pepper-32-characters-minimum"
 TAURI_PRODUCTION_ORIGINS = ("tauri://localhost", "http://tauri.localhost")
 
 
+@pytest.mark.parametrize("origin", (*TAURI_PRODUCTION_ORIGINS, "https://example.invalid"))
+def test_workspace_put_preflight_preserves_origin_boundary(tmp_path: Path, origin: str) -> None:
+    app = create_desktop_app(data_dir=tmp_path, launch_token="synthetic-preflight-token")
+    with TestClient(app) as client:
+        response = client.options("/api/workspace-preference", headers={
+            "Origin": origin, "Access-Control-Request-Method": "PUT",
+            "Access-Control-Request-Headers": "content-type,x-qian-desktop-token",
+        })
+    if origin in TAURI_PRODUCTION_ORIGINS:
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == origin
+        assert "PUT" in response.headers["access-control-allow-methods"]
+        assert "x-qian-desktop-token" in response.headers["access-control-allow-headers"].lower()
+    else:
+        assert response.status_code == 400
+        assert "access-control-allow-origin" not in response.headers
+
+
 @pytest.mark.parametrize("origin", TAURI_PRODUCTION_ORIGINS)
 def test_business_api_allows_tauri_production_webview_origin(
     tmp_path: Path, origin: str

@@ -167,5 +167,7 @@ def test_report_reuses_dashboard_ledger_and_traceable_sources(tmp_path: Path) ->
         "file_name": "虚构合同.docx",
         "locator_type": "paragraph",
         "location": {"paragraph": 2},
+        "excerpt": "完全虚构且已脱敏的材料摘录",
+        "provenance": "legacy_unverified",
     }
     assert payload["is_demo"] is False

@@ -58,8 +58,9 @@ class FakeAIProvider:
                     confidence=1,
                     source=SourceLocator(
                         file_name=filename,
-                        row=2,
-                        excerpt="虚构演示字段",
+                        # The explicit synthetic marker contains this exact key;
+                        # the normal parser boundary supplies its actual location.
+                        excerpt=json.dumps(fact_type, ensure_ascii=False),
                     ),
                 )
                 for fact_type, value in synthetic_facts.items()
@@ -269,7 +270,9 @@ class OpenAIResponsesProvider:
         attempts = 0
         failure_code: str | None = None
 
+        from qian_labor.jobs.control import checkpoint, retry_wait
         for attempts in range(1, self.max_attempts + 1):
+            checkpoint()
             try:
                 response = self.client.post(
                     f"{self.base_url}/responses",
@@ -303,7 +306,7 @@ class OpenAIResponsesProvider:
                         failure_code = "AI_PROVIDER_ERROR"
                     break
                 if self.retry_delay_seconds:
-                    time.sleep(self.retry_delay_seconds * (2 ** (attempts - 1)))
+                    retry_wait(self.retry_delay_seconds * (2 ** (attempts - 1)))
 
         if failure_code is not None:
             raise AIProviderError(failure_code) from None

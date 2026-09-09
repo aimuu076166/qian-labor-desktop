@@ -3,10 +3,12 @@ from __future__ import annotations
 import csv
 import io
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Protocol
 
 from PIL import Image, ImageDraw
+from qian_labor.parsers.protocols import ParsedBlock
 
 from qian_labor.security.masking import (
     HashedIdentifier,
@@ -49,6 +51,7 @@ class RedactedImage:
     content: bytes
     identifier_hashes: dict[str, str]
     identifier_evidence: tuple[IdentifierEvidence, ...] = ()
+    ocr_blocks: tuple[ParsedBlock, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,7 @@ class PreparedProviderInput:
     content: bytes
     identifier_hashes: dict[str, str]
     identifier_evidence: tuple[IdentifierEvidence, ...] = ()
+    ocr_blocks: tuple[ParsedBlock, ...] = ()
 
 
 class LocalOCR(Protocol):
@@ -90,7 +94,9 @@ class TesseractOCR:
         if completed.returncode != 0:
             raise PrivacyBoundaryError("AI_LOCAL_REDACTION_FAILED") from None
         try:
-            rows = csv.DictReader(io.StringIO(completed.stdout.decode("utf-8")))
+            rows = csv.DictReader(
+                io.StringIO(completed.stdout.decode("utf-8")), delimiter="\t", quoting=csv.QUOTE_NONE
+            )
             return [
                 OCRToken(
                     text=row["text"],
@@ -111,7 +117,10 @@ class TesseractOCR:
 
 class LocalImageRedactor:
     def __init__(self, ocr: LocalOCR | None = None, *, pepper: str = "") -> None:
-        self.ocr = ocr or TesseractOCR()
+        if ocr is None and sys.platform == "darwin" and getattr(sys, "frozen", False):
+            from qian_labor.security.macos_ocr import MacOSVisionOCR
+            ocr = MacOSVisionOCR()
+        self.ocr = ocr if ocr is not None else TesseractOCR()
         self.pepper = pepper
 
     def redact(self, content: bytes) -> bytes:
@@ -149,7 +158,19 @@ class LocalImageRedactor:
         except (OSError, ValueError):
             raise PrivacyBoundaryError("AI_LOCAL_REDACTION_FAILED") from None
         hashes = self._unique_hashes(evidence)
-        return RedactedImage(output.getvalue(), hashes, evidence)
+        # Keep only masked local line text. Redacted tokens are fully replaced,
+        # including identifiers split across OCR tokens; no raw token persistence.
+        lines: dict[str, list[tuple[int, OCRToken]]] = {}
+        for index, token in enumerate(tokens):
+            lines.setdefault(token.line_key, []).append((index, token))
+        blocks = tuple(ParsedBlock(
+            text=mask_sensitive(" ".join("[REDACTED]" if index in sensitive_tokens else token.text
+                                         for index, token in line)),
+            block_type="ocr_line",
+            locator={"block": number, "bbox": [min(t.left for _, t in line), min(t.top for _, t in line),
+                       max(t.left + t.width for _, t in line), max(t.top + t.height for _, t in line)]},
+        ) for number, line in enumerate(lines.values(), start=1))
+        return RedactedImage(output.getvalue(), hashes, evidence, blocks)
 
     @staticmethod
     def _sensitive_token_indexes(
@@ -224,6 +245,7 @@ class PrivacyBoundary:
                 PreparedProviderContent(redacted.content),
                 redacted.identifier_hashes,
                 redacted.identifier_evidence,
+                redacted.ocr_blocks,
             )
         text = content.decode("utf-8", errors="replace")
         evidence = self._text_evidence(text) if self.pepper else ()

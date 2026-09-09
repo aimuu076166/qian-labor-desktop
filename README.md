@@ -14,7 +14,7 @@ Tauri 2
 + TypeScript
 + Vite
 + SQLite
-+ Python 3.12 sidecar
++ Python sidecar（CI 3.12；本地本轮检查 3.13.3）
 ```
 
 面向最终用户的目标是安装桌面应用后即可使用，不要求安装 Docker、PostgreSQL、Redis、Caddy、Node.js、Rust、Python，也不要求准备云服务器或域名。开发者从源码构建时仍需安装相应工具链和平台依赖。
@@ -26,17 +26,14 @@ Tauri 2
 → Tauri 启动本机 Python sidecar
 → 每次启动生成随机 IPC token
 → SQLite 初始化或恢复
-→ 首次启动在应用内配置并验证智谱 API Key
-→ API Key 与隐私 pepper 存入当前用户的应用私有目录
-→ 原生文件选择器选择材料
-→ 文件复制到应用私有目录
-→ 本地解析和隐私处理
-→ 智谱 GLM Provider 抽取事实
-→ 自动员工匹配，歧义项进入人工匹配复核
-→ R01—R20 确定性规则
-→ Dashboard、风险详情、员工台账与报告
-→ 通过系统打印对话框存储为 PDF
-→ 删除及持久化清理
+→ 直接浏览企业工作台和员工档案（无需登录、无需先验证模型）
+→ 选择企业，原生选择材料并复制到当前企业的私有材料档案
+→ 需要处理时，才配置并验证智谱并明确点击“开始分析”
+→ 本地解析、OCR、脱敏；模型抽取事实及单独的合同条款观察
+→ 员工归属核对、选择当前合同与核查日期、有效事实人工复核
+→ 明确本地重新评估；查看当前范围内的确定性结果
+→ 明确生成并保存不可变报告草稿版本，选择版本后系统打印为 PDF
+→ 重启恢复、历史只读；按归属删除历史副本，不删除当前材料档案
 ```
 
 ## 产品和法律边界
@@ -44,7 +41,9 @@ Tauri 2
 本项目坚持：
 
 - **资料不足 ≠ 无风险**；
-- AI 只抽取非结构化事实，R01—R20 负责确定性风险判断；
+- 模型抽取事实，另提供标明“未经核验”的合同条款观察；条款观察不计入确定性高、中风险数量；
+- 通用回归保留完整 R01—R20 目录和原有语义；员工材料工作台使用 `labor_materials_v1` 的当前范围，不等于执行全部通用规则；
+- 不做工资/考勤对账、工资/加班费/补偿金计算、登录、云同步或 HR 扩展；合同工资条款审阅仍在范围内；
 - 高影响事项保留人工复核；
 - 每条风险应可追溯到材料来源；
 - 自动化、截图和 Demo 只能使用 synthetic 数据。
@@ -59,7 +58,17 @@ Tauri 2
 - `OpenAIResponsesProvider`；
 - `ZhipuChatCompletionsProvider`。
 
-面向普通用户的桌面流程只开放智谱 Provider。首次启动必须在设置页输入并通过连接测试；未配置或未验证时，材料分析会被明确阻止，外部调用失败也不会降级为 Fake。`FakeAIProvider` 仅供自动化测试和显式打包 smoke 使用，不能作为用户流程的无密钥兜底。
+面向普通用户的桌面流程只开放智谱 Provider。浏览、建档、导入和阅读已保存报告不要求先配置模型；明确开始可能消耗额度的分析前，必须在设置页保存并通过连接测试。未配置或未验证时，处理会被明确阻止，外部调用失败也不会降级为 Fake。`FakeAIProvider` 仅供自动化测试和显式打包 smoke 使用，不能作为真实模型验收证据。
+
+## 员工优先工作流与不确定状态
+
+企业持有长期员工档案；当前材料是可继续补充的工作副本，历史体检保留原事实、结果和日期。未绑定旧批次只能在明确核对归属后收养；复用历史材料会创建当前档案下的新私有副本，不改原文件或历史结果，也不会自动开始处理。
+
+每次事实修订都受员工归属、版本、来源和上下文校验。更换当前合同、核查日期或事实后，既有评估可变为过期；旧草稿必须重新核对后才采用新依据。局部成功、资料不足、员工待匹配、原文未定位、尚未执行、未知提交结果均不是“安全”或“无风险”。超出单表 10000 行/200 列的 Excel 内容整份拒绝处理，不能以截断内容宣称完整。
+
+处理必须显式启动；取消只停止后续本机工作，已发出的远端请求仍可能收费。中断/重启后显示可复用与待处理材料，明确恢复才继续。请求超时或暂未查到回执时保留原 UUID 和原操作依据，核对只读；明确重试使用原请求，不能通过另建请求推定上次没有发生。
+
+生成报告只冻结当前复核草稿，不调用模型、不重新体检。每个版本保留保存时间、体检依据、来源与人工记录；当前输入变化只增加过期提示，不更新保存内容或哈希。版本列表、详情及打印显示选中版本的数据；当前来源损坏时，安全的旧版本仍可阅读，但停止生成新版本。删除仅针对获授权的历史分析及其私有副本/报告/回执；当前材料和长期员工档案受保护。
 
 桌面主程序从当前用户的应用私有目录读取秘密后，仅在启动 sidecar 时注入其进程环境；React 不接触 Key 或 pepper。开发和维护脚本仍可使用以下运行环境变量：
 
@@ -137,7 +146,7 @@ cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --locked
 
 `.github/workflows/desktop-rc.yml` 只在 `release/` 分支的 Pull Request 或手动 `workflow_dispatch` 时运行高成本打包。当前收口范围只生成 Apple Silicon macOS 的 `.app` / `.dmg`，固定使用 Node.js 22、pnpm 9.15.0、Python 3.12、Rust 1.98.0 和 Xcode 26.2。候选标签是 `0.1.0-rc.1`；应用内部版本仍为 `0.1.0`。Windows 安装包不属于本阶段交付范围。
 
-候选文件从该 Pull Request 的 GitHub Actions `desktop-rc` run 下载；优先下载最终的 `qian-labor-desktop-0.1.0-rc.1-unsigned` 汇总 artifact，而不是把平台 job 的中间 artifact 当作正式候选。普通用户首次启动必须在应用内配置并验证自己的智谱 API Key；未完成验证时，应用会阻止材料分析，不会静默使用 Fake Provider。无签名候选仍应先使用 synthetic 材料完成安装验收，再由数据责任人决定是否导入真实材料。
+候选文件从该 Pull Request 的 GitHub Actions `desktop-rc` run 下载；优先下载最终的 `qian-labor-desktop-0.1.0-rc.1-unsigned` 汇总 artifact，而不是把平台 job 的中间 artifact 当作正式候选。普通用户打开工作台无需登录或先验证模型；明确开始材料分析前，必须在应用内配置并验证自己的智谱 API Key，未完成验证时会阻止分析，不会静默使用 Fake Provider。无签名候选仍应先使用 synthetic 材料完成安装验收，再由数据责任人决定是否导入真实材料。
 
 验收分为四层，不能互相替代：
 
@@ -179,7 +188,7 @@ shasum -a 256 -c SHA256SUMS.txt
 
 校验失败时不要安装或绕过警告。不要要求测试者全局关闭 Gatekeeper；如需继续，只能对已核对哈希的单个内部候选按本机安全策略处理。
 
-Fake Provider 仅用于自动化测试和显式打包 smoke；普通用户流程只接受经连接测试验证的智谱 Provider。API Key 与本地隐私 pepper 存放在权限为 `0600` 的应用私有文件中，不写入 React、SQLite、日志或安装包。完成 synthetic 验收并退出应用后，如需清除本地测试数据，应先确认主程序和 sidecar 已退出，再删除当前用户下的应用数据目录：macOS 为 `~/Library/Application Support/cn.qianlabor.desktop`。清理前应确认目录标识符完全一致，避免删除其他应用数据。
+Fake Provider 仅用于自动化测试和显式打包 smoke；普通用户的显式处理只接受经连接测试验证的智谱 Provider。API Key 与本地隐私 pepper 存放在权限为 `0600` 的应用私有文件中，不写入 React、SQLite、日志或安装包。synthetic 验收后只通过应用内明确归属的历史分析删除清理测试副本，并确认当前材料、长期员工档案和其他企业未受影响。不要把删除整个应用数据目录当成正常测试清理步骤；其中可能已有其他企业或真实材料。
 
 只有 macOS ARM64 的 built-sidecar、正常 packaged-app、Launch Services 启动与异常生命周期清理 smoke 都真实通过，最终下载产物经独立重算 SHA-256 后一致，并且由用户自有 Key 完成 exact-head 真实 Provider synthetic 验收，RC Pull Request 才能从 Draft 转为 Ready。动态 commit、run ID、大小和 SHA-256 以 PR 的 exact-head 证据、`BUILD-MANIFEST.json` 与 `SHA256SUMS.txt` 为准，不回填到源码模板形成 provenance 循环。缺少真实 Provider 验收时必须保持 Draft，不能用 Fake、源码测试、bundle 检查或推测替代 `PASS`。详细规则见 `docs/release/v0.1.0-rc.1-checklist.md`。
 
@@ -202,7 +211,9 @@ REASON=AI_API_KEY_MISSING
 IMAGE_INPUT=NOT_RUN
 ```
 
-该脚本是维护者使用的命令行门禁；安装包的普通用户验收应在应用设置页输入用户自己的 Key，并只使用 synthetic 材料。两条路径都不得在聊天、日志、fixture 或 CI 中传递 Key。
+该脚本仅保留维护者的旧命令行诊断入口，不能代替当前强制验收。最终必须在正常应用设置中安全配置用户自己的模型通道，并使用中文十名虚构员工/八份混合材料完成真实 GLM 语义、图片和扫描件检查；记录原始 ID、日期、条款及真实位置，不准备模型标准答案。两条路径都不得在聊天、日志、fixture 或 CI 中传递 Key。
+
+构建清单中的 `real_provider_smoke=NOT_RUN`、`image_input=NOT_RUN` 继续如实表示 CI 没运行；另附注明最终 commit、实际下载 artifact SHA-256 的安装验收报告，不能把手工结果伪装为 CI PASS。最终 Mac 原生启动、导入、处理/取消/恢复、匹配、事实核对、版本打印、重启、归属删除和退出清理都是 Ready 前门禁，不是可选补充。此 README 不声明这些待执行项目已经通过。
 
 ## 当前限制
 
@@ -211,7 +222,10 @@ IMAGE_INPUT=NOT_RUN
 - 尚无自动更新；
 - 尚未发布正式签名安装包；
 - `v0.1.0-rc.1` 工作流只产生临时候选 artifact，不创建标签或 GitHub Release；
-- 图片/VLM 验收、Word 报告和多 Provider 用户配置不在本 RC 范围；
+- 图片/扫描材料的真实模型与安装验收是本 RC 强制门禁，当前结果须查最终 exact-head 验收记录；Word 报告和多 Provider 用户配置不在范围；
+- 底层 OpenAI 适配尚不支持完整实际提取 schema 的 tuple `prefixItems` 和字符串长度约束；最小 schema 传输测试不代表完整 OpenAI 可用，GLM-only RC 不扩展该适配器；
+- CI Python 3.12 与本地 3.13.3 结果分别记录；已知 Starlette/httpx、AnyIO、SWIG 弃用警告保留，不作隐藏或临时依赖升级；
+- macOS 最低 11.0 是构建元数据，不等于已在 macOS 11 实机测试。本轮开发主机 macOS 15.7.3；最终报告须单列实际安装测试主机及最低版本未验证限制；
 - PR 转 Ready 前仍必须由用户在应用内完成真实智谱 Provider 的 synthetic 验收。
 
 ## License

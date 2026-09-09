@@ -55,8 +55,15 @@ def create_database(url: str, *, create_schema: bool = False) -> Database:
 
 
 def create_desktop_database(data_dir: Path) -> Database:
-    path = (data_dir / "qian-labor.db").resolve()
+    from qian_labor.sqlite_migrations import bootstrap_desktop_database
+
+    path = data_dir.resolve() / "qian-labor.db"
     path.parent.mkdir(parents=True, exist_ok=True)
-    database = create_database(f"sqlite+pysqlite:///{path.as_posix()}", create_schema=True)
+    database = create_database(f"sqlite+pysqlite:///{path.as_posix()}")
     database.path = path
+    try:
+        bootstrap_desktop_database(database.engine, path)
+    except BaseException:
+        database.dispose()
+        raise
     return database

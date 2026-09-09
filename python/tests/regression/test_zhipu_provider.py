@@ -233,7 +233,7 @@ def test_zhipu_provider_recovers_observed_generic_value_with_blank_value_type() 
     assert result.facts[0].value is True
 
 
-def test_zhipu_provider_discards_a_fact_whose_value_type_cannot_feed_its_rule() -> None:
+def test_zhipu_provider_rejects_a_fact_whose_value_type_cannot_feed_its_rule() -> None:
     payload = _provider_payload()
     fact = payload["facts"][0]
     assert isinstance(fact, dict)
@@ -249,9 +249,8 @@ def test_zhipu_provider_discards_a_fact_whose_value_type_cannot_feed_its_rule() 
     def handler(_request: httpx.Request) -> httpx.Response:
         return _success_response(payload)
 
-    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
-
-    assert result.facts == []
+    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
+        _provider(handler).extract("虚构合同.txt", b"fictional contract")
 
 
 def test_zhipu_provider_accepts_consistent_redundant_text_for_a_typed_value() -> None:
@@ -268,7 +267,7 @@ def test_zhipu_provider_accepts_consistent_redundant_text_for_a_typed_value() ->
     assert result.facts[0].value is True
 
 
-def test_zhipu_provider_discards_conflicting_redundant_text_for_a_typed_value() -> None:
+def test_zhipu_provider_rejects_conflicting_redundant_text_for_a_typed_value() -> None:
     payload = _provider_payload()
     fact = payload["facts"][0]
     assert isinstance(fact, dict)
@@ -277,12 +276,11 @@ def test_zhipu_provider_discards_conflicting_redundant_text_for_a_typed_value() 
     def handler(_request: httpx.Request) -> httpx.Response:
         return _success_response(payload)
 
-    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
+        _provider(handler).extract("虚构合同.txt", b"fictional contract")
 
-    assert result.facts == []
 
-
-def test_zhipu_provider_discards_conflicting_generic_alias_fact_without_losing_batch() -> None:
+def test_zhipu_provider_rejects_conflicting_generic_alias_instead_of_empty_success() -> None:
     payload = _provider_payload()
     fact = payload["facts"][0]
     assert isinstance(fact, dict)
@@ -292,9 +290,55 @@ def test_zhipu_provider_discards_conflicting_generic_alias_fact_without_losing_b
     def handler(_request: httpx.Request) -> httpx.Response:
         return _success_response(payload)
 
-    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
+        _provider(handler).extract("虚构合同.txt", b"fictional contract")
 
-    assert result.facts == []
+
+def test_zhipu_provider_does_not_silently_accept_only_the_valid_part_of_a_response() -> None:
+    payload = _provider_payload()
+    valid = payload["facts"][0]
+    payload["facts"].append({**valid, "value_text": "false"})
+    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
+        _provider(lambda _: _success_response(payload)).extract("虚构合同.txt", b"synthetic")
+
+
+def test_zhipu_provider_preserves_explicit_unknown_fact_as_reviewable_missing_evidence() -> None:
+    payload = _provider_payload()
+    payload["facts"][0].update(value_type="null", value_boolean=None)
+    result = _provider(lambda _: _success_response(payload)).extract("虚构合同.txt", b"synthetic")
+    assert len(result.facts) == 1
+    assert result.facts[0].value is None
+    assert result.facts[0].needs_human_confirmation
+
+
+def test_zhipu_provider_empty_valid_response_is_not_a_successful_extraction() -> None:
+    payload = _provider_payload()
+    payload["facts"] = []
+    with pytest.raises(AIProviderError, match="AI_NO_SUPPORTED_FACTS"):
+        _provider(lambda _: _success_response(payload)).extract("虚构合同.txt", b"synthetic")
+
+
+@pytest.mark.parametrize("updates", [
+    {"fact_type": "employment.pay.actual_wage", "value_type": "number", "value_boolean": None, "value_number": True},
+    {"value_boolean": 1},
+    {"value_": 1},
+    {"fact_type": "employment.pay.actual_wage", "value_type": "number", "value_boolean": None,
+     "value_number": 9007199254740993},
+    {"fact_type": "employment.pay.actual_wage", "value_type": "number", "value_boolean": None,
+     "value_number": 9007199254740992.0, "value_text": "9007199254740993"},
+])
+def test_zhipu_provider_rejects_type_coercion_and_lossy_numeric_aliases(updates) -> None:
+    payload = _provider_payload()
+    payload["facts"][0].update(updates)
+    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
+        _provider(lambda _: _success_response(payload)).extract("虚构合同.txt", b"synthetic")
+
+
+def test_zhipu_prompt_requires_one_populated_typed_value_and_preserves_explicit_facts() -> None:
+    request = ZhipuChatCompletionsProvider._request_payload("synthetic.txt", b"synthetic", MODEL, False)
+    prompt = request["messages"][0]["content"]
+    assert "All unused value_* fields must be null" in prompt
+    assert "Do not omit an explicitly supported canonical fact" in prompt
 
 
 def test_zhipu_provider_retries_rate_limit_without_leaking_response_body() -> None:
