@@ -1,4 +1,5 @@
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
+import { QueryClient } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { companyServer, json, renderCompany, syntheticConfiguration } from './company-fixture';
 import type { TaskRun } from '../src/features/processing/useAnalysisTask';
@@ -312,6 +313,64 @@ describe('task lifecycle through actual App', () => {
     expect(screen.queryByRole('button', { name: '取消分析' })).not.toBeInTheDocument();
     expect(posts(f)).toHaveLength(0);
   });
+
+  it('refreshes materials while an active task runs, reflects file changes without a new run version, and stops after terminal state', async () => {
+    const f = fixture(run('running', 1));
+    let workspaceCalls = 0;
+    let changed = false;
+    const api = async (path: string, init?: RequestInit) => {
+      const response = await f.server.request(path, init);
+      if (!path.endsWith('/workspace')) return response;
+      workspaceCalls += 1;
+      if (!changed) return response;
+      const payload = await response.json();
+      payload.files[0].status = 'extracting';
+      return json(payload);
+    };
+    renderCompany(f.server, { apiFactory: () => api });
+    await materials();
+    const initialCalls = workspaceCalls;
+    changed = true;
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    expect(workspaceCalls).toBeGreaterThan(initialCalls);
+    expect(await screen.findByText('正在提取')).toBeInTheDocument();
+    f.setRun(run('completed', 2));
+    await new Promise(resolve => setTimeout(resolve, 1400));
+    const terminalCalls = workspaceCalls;
+    await new Promise(resolve => setTimeout(resolve, 1200));
+    expect(workspaceCalls).toBe(terminalCalls);
+  }, 8000);
+
+  it('does not let a late workspace response from company A overwrite company B', async () => {
+    const f = fixture();
+    const other = { ...f.server.company, id: 'company-two', display_name: '另一虚构企业' };
+    const bProjection = { ...f.server.projection(), company: other, current_analysis: { ...f.server.projection().current_analysis!, analysis_id: 'other', company_id: other.id }, employees: [], enrolled_employee_count: 0, total: 0 };
+    let finishA!: (response: Response) => void;
+    let holdA = false;
+    const api = async (path: string, init?: RequestInit) => {
+      if (path === '/api/company-workspaces') return json([f.server.company, other]);
+      if (path.startsWith('/api/company-workspaces/company-two/current?')) return json(bProjection);
+      if (path === '/api/analyses/current/workspace' && holdA) return new Promise<Response>(resolve => { finishA = resolve; });
+      if (path === '/api/analyses/other/workspace') return json({ analysis: { id: 'other', name: 'B 企业材料档案', company_display_name: other.display_name, status: 'completed' }, files: [{ id: 'b-file', filename: 'B-only.docx', status: 'uploaded', progress: 0, detected_kind: 'contract', classified_kind: 'contract', error_code: null, size_bytes: 10, fact_count: 1 }] });
+      return f.server.request(path, init);
+    };
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderCompany(f.server, { apiFactory: () => api }, client);
+    await materials();
+    holdA = true;
+    const lateA = client.refetchQueries({ queryKey: ['desktop-workspace', 'current'] });
+    await waitFor(() => expect(finishA).toBeTypeOf('function'));
+    fireEvent.change(screen.getByLabelText('当前企业'), { target: { value: 'company-two' } });
+    await screen.findByText('已建档员工 0 人');
+    fireEvent.click(screen.getByRole('button', { name: '材料' }));
+    await screen.findByRole('heading', { name: 'B 企业材料档案' });
+    await act(async () => finishA(json({ analysis: { id: 'current', name: 'A 企业材料档案', company_display_name: f.server.company.display_name, status: 'completed' }, files: [{ id: 'a-file', filename: 'A-late.docx', status: 'processed', progress: 100, detected_kind: 'contract', classified_kind: 'contract', error_code: null, size_bytes: 10, fact_count: 9 }] })));
+    await lateA;
+    expect(screen.getByRole('heading', { name: 'B 企业材料档案' })).toBeInTheDocument();
+    expect(screen.getByRole('cell', { name: 'B-only.docx' })).toBeInTheDocument();
+    expect(screen.queryByRole('cell', { name: 'A-late.docx' })).not.toBeInTheDocument();
+  }, 8000);
+
   it('does not let a delayed earlier metadata read resurrect a cancelled task', async () => {
     const f = fixture(run()); let hold = false; let finish!: (r: Response) => void;
     const api = async (path: string, init?: RequestInit) => {

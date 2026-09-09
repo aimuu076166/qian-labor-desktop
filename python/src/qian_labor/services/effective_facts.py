@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 
 from qian_labor.ai.fact_contract import FACT_VALUE_TYPES
+from qian_labor.ai.grounding import EXTRACTION_VERSION
 from qian_labor.models.core import (
     AnalysisBatch, CompanyAnalysisBinding, Employee, EmployeeRecord, EmployeeSnapshotBinding,
     EmploymentFact, SourceLocator, UploadedFile, EffectiveFactRevision, AssessmentDecision,
@@ -18,7 +19,7 @@ from qian_labor.models.core import (
 )
 from qian_labor.security.masking import mask_sensitive
 from qian_labor.security.filenames import display_filename
-from qian_labor.services.source_provenance import grounding_requires_review, projected_source
+from qian_labor.services.source_provenance import CITATION_KEY, deterministic_citation_id, grounding_requires_review, projected_source
 
 PENDING = {"conflicted", "pending_review", "needs_human_confirmation"}
 CONTRACT_TYPES = {"employment.contract." + suffix for suffix in
@@ -147,14 +148,22 @@ def latest_decision(s, analysis_id, scope):
         AssessmentDecision.scope == scope).order_by(AssessmentDecision.version.desc()).limit(1))
 
 
-def valid_source_metadata(source):
+def valid_source_metadata(source, *, allow_legacy=False):
     if not isinstance(source.location, dict) or source.content_hash != hashlib.sha256(source.excerpt.encode()).hexdigest():
         return False
     if "_grounding" not in source.location:
         return True  # Legacy labels remain honest; human review is separate.
     proof = source.location["_grounding"]
-    return isinstance(proof, dict) and proof.get("version") == "parser-grounding-v1" and proof.get("status") in {
+    valid_proof = isinstance(proof, dict) and proof.get("status") in {
         "locally_located", "unlocated_needs_review"} and type(proof.get("requires_review", False)) is bool
+    if not valid_proof:
+        return False
+    if proof.get("version") != EXTRACTION_VERSION:
+        return bool(allow_legacy and isinstance(proof.get("version"), str)
+                    and proof.get("version").startswith("parser-grounding-v"))
+    file = getattr(source, "file", None)
+    stored = source.location.get(CITATION_KEY)
+    return bool(file and isinstance(stored, str) and stored == deterministic_citation_id(file.sha256, source.location, source.excerpt))
 
 
 def owned_state(s, fact):
@@ -167,7 +176,7 @@ def owned_state(s, fact):
     valid = bool(file and file.analysis_id == fact.analysis_id and sources and
                  (not file.parsed_document or file.parsed_document.content_hash == file.sha256) and
                  all(x.analysis_id == fact.analysis_id and x.file_id == fact.file_id and
-                     valid_source_metadata(x) for x in sources))
+                     valid_source_metadata(x, allow_legacy=bool(owner and owner.role == "historical")) for x in sources))
     owned = bool(owner and employee and employee.analysis_id == fact.analysis_id and binding and
                  binding.analysis_id == fact.analysis_id and record and record.company_id == owner.company_id)
     decisions = []
@@ -216,12 +225,38 @@ def _revert_revision(row):
     row.verification_status = "needs_human_confirmation"
 
 
+def _has_stale_grounding(session, fact) -> bool:
+    """Keep an explicitly old extraction out of the current projection.
+
+    Old facts and their revisions remain addressable through historical
+    analyses and fact history.  A current analysis must not silently keep
+    using a fact whose parser-grounding proof names an older extraction
+    contract after a new extraction has been persisted.
+    """
+    sources = session.scalars(select(SourceLocator).where(SourceLocator.fact_id == fact.id))
+    return any(
+        isinstance(source.location, dict)
+        and isinstance(source.location.get("_grounding"), dict)
+        and isinstance(source.location["_grounding"].get("version"), str)
+        and source.location["_grounding"]["version"].startswith("parser-grounding-v")
+        and source.location["_grounding"].get("version") != EXTRACTION_VERSION
+        for source in sources
+    )
+
+
 def effective_projection(s, analysis_id, *, employee_ids=None):
     """Acyclic: originals -> contract selection -> date pair -> assessment basis."""
+    owner = s.get(CompanyAnalysisBinding, analysis_id)
     query = select(EmploymentFact).where(EmploymentFact.analysis_id == analysis_id)
     if employee_ids is not None:
         query = query.where(EmploymentFact.employee_id.in_(employee_ids))
-    rows = [fact_projection(s, fact) for fact in s.scalars(query.order_by(EmploymentFact.id))]
+    facts = list(s.scalars(query.order_by(EmploymentFact.id)))
+    if owner and owner.role == "current":
+        # Explicit v1 (or otherwise stale) proofs remain in the database for
+        # historical display and manual-revision history, but cannot be
+        # selected as current assessment input after the grounding upgrade.
+        facts = [fact for fact in facts if not _has_stale_grounding(s, fact)]
+    rows = [fact_projection(s, fact) for fact in facts]
     for eid in {row.employee_id for row in rows if row.employee_id}:
         own = [row for row in rows if row.employee_id == eid]
         choice = latest_decision(s, analysis_id, "current_contract:" + eid)

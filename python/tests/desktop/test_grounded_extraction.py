@@ -82,10 +82,21 @@ def test_xlsx_actual_dates_are_readable_dates():
 
 
 def test_extraction_key_is_versioned_but_parse_key_is_not():
+    from qian_labor.ai.grounding import EXTRACTION_VERSION
     key = ProcessingPipeline._job_key("a", "f", "extract", "digest")
     assert key != "a:f:extract:digest"
-    assert "parser-grounding-v1" in key
+    assert EXTRACTION_VERSION in key
     assert ProcessingPipeline._job_key("a", "f", "parse", "digest") == "a:f:parse:digest"
+
+
+def test_v2_extraction_does_not_reuse_v1_key_but_keeps_parse_key():
+    from qian_labor.ai.grounding import EXTRACTION_VERSION
+
+    assert EXTRACTION_VERSION == "parser-grounding-v2"
+    assert ProcessingPipeline._job_key("a", "f", "parse", "digest") == "a:f:parse:digest"
+    assert ProcessingPipeline._job_key("a", "f", "extract", "digest") != (
+        "a:f:extract:digest:parser-grounding-v1:contract-advisory-v1"
+    )
 
 
 def test_zhipu_text_limit_fails_before_transport():
@@ -225,6 +236,122 @@ def test_partial_parser_warning_and_old_cache_upgrade_are_explicit(tmp_path):
         assert provider.calls == 2
 
 
+def test_legacy_v1_success_job_is_not_reusable_after_grounding_upgrade(tmp_path):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from qian_labor.desktop.app import create_desktop_app
+    from qian_labor.models.core import AnalysisBatch, ProcessingJob, UploadedFile
+    from qian_labor.storage.local import LocalStorage
+    from test_workspace_api import HEADERS, TOKEN
+
+    class GroundedProvider:
+        name, is_external = "fake", False
+
+        def extract(self, filename, content):
+            return result("SYN-001 signed contract")
+
+    app = create_desktop_app(data_dir=tmp_path / "app", launch_token=TOKEN)
+    with TestClient(app) as client:
+        aid = client.post("/api/analyses", headers=HEADERS,
+                          json={"name": "legacy cache", "company_display_name": "fictional"}).json()["id"]
+        path = tmp_path / "contract.docx"
+        path.write_bytes(word_bytes())
+        client.post(f"/api/analyses/{aid}/import-paths", headers=HEADERS,
+                    json={"paths": [str(path)]})
+        pipeline = ProcessingPipeline(app.state.database, LocalStorage(str(app.state.storage_root)), GroundedProvider())
+        pipeline.process(aid)
+        with app.state.database.session() as session:
+            file = session.scalar(select(UploadedFile).where(UploadedFile.analysis_id == aid))
+            job = session.scalar(select(ProcessingJob).where(
+                ProcessingJob.analysis_id == aid, ProcessingJob.job_type == "extract"))
+            assert file is not None and job is not None and job.status == "succeeded"
+            job.unique_key = f"{aid}:{file.id}:extract:{file.sha256}:parser-grounding-v1:contract-advisory-v1"
+            session.get(AnalysisBatch, aid).status = "completed"
+            session.commit()
+            assert ProcessingPipeline.cached_extraction(session, aid, file, GroundedProvider()) is False
+        workspace = client.get(f"/api/analyses/{aid}/workspace", headers=HEADERS).json()
+        assert workspace["files"][0]["extraction_version"] is None
+        assert workspace["files"][0]["needs_reextraction"] is True
+
+
+def test_v1_fact_and_revision_are_preserved_but_current_projection_uses_v2(tmp_path):
+    import hashlib
+    from sqlalchemy import select
+    from qian_labor.models.core import (
+        AnalysisBatch, CompanyAnalysisBinding, CompanyWorkspace, EmploymentFact,
+        SourceLocator, UploadedFile,
+    )
+    from qian_labor.services.effective_facts import effective_projection
+    from qian_labor.services.source_provenance import deterministic_citation_id
+    from fastapi.testclient import TestClient
+    from qian_labor.desktop.app import create_desktop_app
+    from qian_labor.storage.local import LocalStorage
+    from test_workspace_api import HEADERS, TOKEN
+
+    class GroundedProvider:
+        name, is_external = "fake", False
+
+        def extract(self, filename, content):
+            return result("SYN-001 signed contract")
+
+    app = create_desktop_app(data_dir=tmp_path / "app", launch_token=TOKEN)
+    with TestClient(app) as client:
+        aid = client.post("/api/analyses", headers=HEADERS,
+                          json={"name": "versioned facts", "company_display_name": "fictional"}).json()["id"]
+        path = tmp_path / "contract.docx"
+        path.write_bytes(word_bytes())
+        client.post(f"/api/analyses/{aid}/import-paths", headers=HEADERS,
+                    json={"paths": [str(path)]})
+        with app.state.database.session() as session:
+            file = session.scalar(select(UploadedFile).where(UploadedFile.analysis_id == aid))
+            company = CompanyWorkspace(id="synthetic-version-company", display_name="fictional")
+            session.add(company)
+            session.flush()
+            session.add(CompanyAnalysisBinding(analysis_id=aid, company_id=company.id, role="current"))
+            old = EmploymentFact(
+                analysis_id=aid, employee_id=None, file_id=file.id,
+                fact_type="employment.contract.exists", value_json=True,
+                normalized_value_json=True, extraction_method="synthetic-v1", confidence=1,
+                verification_status="confirmed", dedupe_key="v1-" + aid,
+            )
+            session.add(old)
+            session.flush()
+            excerpt = "SYN-001 signed contract"
+            location = {"paragraph": 1, "_grounding": {
+                "version": "parser-grounding-v1", "status": "locally_located", "requires_review": False,
+            }}
+            location["_citation_id"] = deterministic_citation_id(file.sha256, location, excerpt)
+            session.add(SourceLocator(
+                analysis_id=aid, file_id=file.id, fact_id=old.id,
+                locator_type="paragraph", location=location, excerpt=excerpt,
+                content_hash=hashlib.sha256(excerpt.encode()).hexdigest(),
+            ))
+            session.commit()
+            old_id = old.id
+        pipeline = ProcessingPipeline(app.state.database, LocalStorage(str(app.state.storage_root)), GroundedProvider())
+        pipeline.process(aid)
+        with app.state.database.session() as session:
+            facts = list(session.scalars(select(EmploymentFact).where(EmploymentFact.analysis_id == aid)))
+            current_rows = effective_projection(session, aid)
+            assert old_id in {fact.id for fact in facts}
+            assert old_id not in {row.id for row in current_rows}
+            assert any(row.id != old_id for row in current_rows)
+            old_source = session.scalar(select(SourceLocator).where(SourceLocator.fact_id == old_id))
+            assert old_source.location["_grounding"]["version"] == "parser-grounding-v1"
+            from qian_labor.services.report_versions import ReportVersionService
+            company_id = session.scalar(select(CompanyAnalysisBinding.company_id).where(
+                CompanyAnalysisBinding.analysis_id == aid))
+            payload, context = ReportVersionService(app.state.database, None).capture(session, company_id, aid)
+            assert payload["facts"]
+            assert context["input_revision"]
+            session.scalar(select(CompanyAnalysisBinding).where(
+                CompanyAnalysisBinding.analysis_id == aid)).role = "historical"
+            historical_rows = effective_projection(session, aid)
+            assert old_id in {row.id for row in historical_rows}
+            assert next(row for row in historical_rows if row.id == old_id).state.valid is True
+            assert session.get(AnalysisBatch, aid) is not None
+
+
 def test_old_confirmed_fact_cannot_bypass_new_unlocated_uncertainty(review_case):
     from sqlalchemy import select
     from qian_labor.models.core import EmploymentFact, SourceLocator
@@ -359,12 +486,30 @@ def test_ten_employee_mixed_pipeline_sources_and_retry(tmp_path):
         with app.state.database.session() as session:
             sources = list(session.scalars(select(SourceLocator)))
             facts = list(session.scalars(select(EmploymentFact)))
+            from qian_labor.services.source_provenance import deterministic_citation_id
+            assert all(
+                source.location.get("_citation_id") == deterministic_citation_id(
+                    session.get(UploadedFile, source.file_id).sha256,
+                    source.location,
+                    source.excerpt,
+                )
+                for source in sources
+            )
             assert set(EMPLOYEES) <= {re.search(r"SYN-\d{3}", f.value_json).group() for f in facts}
             assert all(s.location["_grounding"]["status"] == "locally_located" for s in sources)
             assert any(s.location.get("table") == 1 for s in sources)
             assert any(s.location.get("page") == 2 for s in sources)
             assert any(s.location.get("cell") == "A2" for s in sources)
             assert any(s.location.get("bbox") == [10, 20, 360, 32] for s in sources)
+            embedded_file = next(f for f in session.scalars(select(UploadedFile))
+                                 if f.original_filename == "embedded-warning.docx")
+            embedded_sources = [s for s in sources if s.file_id == embedded_file.id]
+            assert any(
+                s.location.get("paragraph") == 2
+                and s.location.get("image") == 1
+                and "page" not in s.location
+                for s in embedded_sources
+            )
             before = {(s.id, s.fact_id, s.excerpt) for s in sources}
             file_ids = list(session.scalars(select(UploadedFile.id)))
             # Simulate an interrupted retry without deleting old facts/sources.
@@ -463,7 +608,7 @@ def test_cross_file_same_value_keeps_owned_facts_and_unlocated_uncertainty(revie
             if state == "unlocated_needs_review":
                 extracted.facts[0].source.excerpt = ""
             pipeline._persist_result(session, aid, file, extracted, grounding=[{
-                "version": "parser-grounding-v1", "status": state, "requires_review": False}])
+                "version": "parser-grounding-v2", "status": state, "requires_review": False}])
         session.flush()
         facts = list(session.scalars(select(EmploymentFact).where(EmploymentFact.analysis_id == aid,
             EmploymentFact.extraction_method == pipeline.provider.name)))

@@ -19,7 +19,7 @@ from qian_labor.models.core import (
 from qian_labor.security.filenames import display_filename
 from qian_labor.security.masking import mask_sensitive
 from qian_labor.services.company_workspaces import WorkspaceError
-from qian_labor.services.source_provenance import projected_source
+from qian_labor.services.source_provenance import CITATION_KEY, deterministic_citation_id, projected_source
 from qian_labor.sqlite_migrations import assert_no_pending_recovery
 
 
@@ -99,6 +99,7 @@ def persist_run(session, analysis_id, file, key, results, grounded, assignments,
             location = row.source.model_dump(exclude={"file_name", "excerpt"}, exclude_none=True)
             location[PROOF_KEY] = row.proof
             excerpt = mask_sensitive(row.source.excerpt)
+            location[CITATION_KEY] = deterministic_citation_id(file.sha256, location, excerpt)
             original = row.observation.model_dump(exclude={"source"})
             original = {k: [mask_sensitive(v) for v in value] if isinstance(value, list)
                         else mask_sensitive(value) if isinstance(value, str) else value
@@ -162,7 +163,8 @@ class ContractAdvisoryService:
     def _observation(self, s, company_id, analysis_id, row, readonly):
         run, file = self._validate(s, company_id, analysis_id, row)
         latest = self._latest(s, run)
-        source = projected_source(SimpleNamespace(location=row.source_location, excerpt=row.source_excerpt, locator_type="document"))
+        source = projected_source(SimpleNamespace(location=row.source_location, excerpt=row.source_excerpt,
+                                                   locator_type="document", file=file))
         handling = s.scalar(select(ContractAdvisoryHandling).where(ContractAdvisoryHandling.observation_id == row.id)
                             .order_by(ContractAdvisoryHandling.version.desc()).limit(1))
         candidate = s.get(EmployeeMatchCandidate, row.match_candidate_id) if row.match_candidate_id else None

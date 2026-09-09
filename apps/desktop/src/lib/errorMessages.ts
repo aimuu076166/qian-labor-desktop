@@ -58,7 +58,7 @@ const MESSAGES: Record<string, string> = {
   AI_ACCOUNT_ARREARS: '所选模型接口返回额度不足，请核对接口通道和对应额度；这不代表所有套餐均不可用。',
   AI_QUOTA_EXCEEDED: '所选接口的额度已用尽，请检查额度或等待重置。',
   AI_PLAN_EXPIRED: '所选接口返回套餐到期，请核对对应套餐状态。',
-  AI_SCHEMA_INVALID: '模型返回的内容未通过结构校验，未作为有效分析结果采用。可重试失败材料。',
+  AI_SCHEMA_INVALID: '模型返回内容未完整通过结构校验（可能是空正文、JSON/字段结构或响应被截断），未作为有效分析结果采用。可重试失败材料。',
   AI_NO_SUPPORTED_FACTS: '模型未提取到可用于本次体检的事实，不能据此判断没有风险。请检查材料内容，补充清晰、相关的材料后再分析。',
   AI_PROVIDER_ERROR: '模型请求未成功，请核对服务地址、网络和模型权限。',
   DESKTOP_REQUEST_TIMEOUT: '本机请求等待超时，操作可能仍在后台进行。请先重新读取状态，不要重复提交。',
@@ -73,4 +73,32 @@ const MESSAGES: Record<string, string> = {
 export function describeOperationError(code: string): string {
   const message = MESSAGES[code] ?? '操作未完成，请重新读取当前状态；仍失败时保留材料并联系支持。';
   return /^(?:AI|DESKTOP|MATCH|PROCESSING|WORKSPACE|HISTORICAL|ADVISORY|FACT|ASSESSMENT|TASK|ANALYSIS)_[A-Z0-9_]+$/.test(code) ? `${message}（${code}）` : message;
+}
+
+const DIAGNOSTIC_MESSAGES: Record<string, string> = {
+  configuration: '配置不完整',
+  privacy: '本地脱敏边界未完成',
+  budget: '本地预算门禁未通过',
+  limit: '服务端或本地限额已触发',
+  http: '模型接口返回了 HTTP 错误',
+  transport: '网络传输未完成',
+  timeout: '模型响应超时',
+  response: '模型响应为空或不完整',
+  json: '模型响应不是有效 JSON',
+  schema: '模型响应字段结构不符合约定',
+  semantic: '模型返回内容存在事实冲突',
+  incomplete: '模型响应在结束前中断',
+  provider: '模型服务返回了未分类错误',
+};
+
+export function describeOperationDiagnostic(diagnostic?: { category?: string; status_code?: number; finish_reason?: string; attempt?: number } | null): string | null {
+  if (!diagnostic || typeof diagnostic.category !== 'string') return null;
+  const label = DIAGNOSTIC_MESSAGES[diagnostic.category];
+  if (!label) return null;
+  const details = [
+    typeof diagnostic.status_code === 'number' ? `HTTP ${diagnostic.status_code}` : '',
+    diagnostic.finish_reason === 'length' ? '输出达到长度上限' : '',
+    typeof diagnostic.attempt === 'number' ? `第 ${diagnostic.attempt} 次请求` : '',
+  ].filter(Boolean).join('，');
+  return `诊断：${label}${details ? `（${details}）` : ''}`;
 }

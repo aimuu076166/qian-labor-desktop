@@ -34,6 +34,7 @@ from qian_labor.models.core import (
     ProcessingJob,
     RiskFinding,
     UploadedFile,
+    AuditEvent,
 )
 from qian_labor.security.local_redaction import PrivacyBoundary
 from qian_labor.services.analyses import AnalysisService
@@ -73,6 +74,16 @@ def _processing_payload(database, analysis_id: str) -> dict[str, object]:
                 .order_by(ProcessingJob.started_at)
             )
         )
+        diagnostics: dict[str, tuple[str | None, dict[str, object]]] = {}
+        for event in session.scalars(select(AuditEvent).where(
+            AuditEvent.analysis_id == analysis_id,
+            AuditEvent.event_type == "processing_failed",
+        ).order_by(AuditEvent.created_at, AuditEvent.id)):
+            metadata = event.metadata_json if isinstance(event.metadata_json, dict) else {}
+            file_id = metadata.get("file_id")
+            diagnostic = metadata.get("diagnostic")
+            if isinstance(file_id, str) and isinstance(diagnostic, dict):
+                diagnostics[file_id] = (metadata.get("error_code"), diagnostic)
         return {
             "analysis_id": analysis.id,
             "status": analysis.status,
@@ -87,6 +98,8 @@ def _processing_payload(database, analysis_id: str) -> dict[str, object]:
                     "status": item.status,
                     "progress": item.progress,
                     "error_code": item.error_code,
+                    "error_diagnostic": (diagnostics[item.id][1]
+                        if item.error_code and item.id in diagnostics and diagnostics[item.id][0] == item.error_code else None),
                 }
                 for item in files
             ],

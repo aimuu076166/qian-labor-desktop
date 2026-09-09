@@ -11,10 +11,10 @@ from qian_labor.ai.schemas import ClauseObservation, ContractAdvisory, Extractio
 from qian_labor.parsers.protocols import ParsedBlock
 from qian_labor.security.masking import mask_sensitive
 
-EXTRACTION_VERSION = "parser-grounding-v1"
+EXTRACTION_VERSION = "parser-grounding-v2"
 MAX_TEXT_CHARACTERS = 100_000
 PROOF_KEY = "_grounding"
-POSITION_KEYS = ("page", "sheet", "row", "column", "cell", "paragraph", "table", "block", "bbox")
+POSITION_KEYS = ("page", "sheet", "row", "column", "cell", "paragraph", "table", "image", "block", "bbox")
 _PLANNED_LANGUAGE = re.compile(r"拟|计划|待签|草案|意向|预计|将于|尚未|待定")
 
 

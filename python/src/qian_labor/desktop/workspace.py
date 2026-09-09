@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 
 from qian_labor.database import Database
 from qian_labor.security.filenames import display_filename
-from qian_labor.models.core import AnalysisBatch, EmploymentFact, UploadedFile, ProcessingJob, ParsedDocument, ContractAdvisoryRun
+from qian_labor.models.core import AnalysisBatch, EmploymentFact, UploadedFile, ProcessingJob, ParsedDocument, ContractAdvisoryRun, AuditEvent
 from qian_labor.jobs.processing import ProcessingPipeline
 from qian_labor.ai.grounding import EXTRACTION_VERSION
 from qian_labor.services.analyses import AnalysisService
@@ -44,6 +44,19 @@ def workspace_router(database: Database) -> APIRouter:
             previously_extracted = {job.file_id for job in extraction_jobs}
             advisory_runs = {run.file_id: run for run in session.scalars(select(ContractAdvisoryRun).where(
                 ContractAdvisoryRun.analysis_id == analysis_id).order_by(ContractAdvisoryRun.created_at, ContractAdvisoryRun.id))}
+            diagnostics: dict[str, tuple[str | None, dict]] = {}
+            for event in session.scalars(select(AuditEvent).where(
+                AuditEvent.analysis_id == analysis_id,
+                AuditEvent.event_type == "processing_failed",
+            ).order_by(AuditEvent.created_at, AuditEvent.id)):
+                metadata = event.metadata_json if isinstance(event.metadata_json, dict) else {}
+                file_id = metadata.get("file_id")
+                diagnostic = metadata.get("diagnostic")
+                if isinstance(file_id, str) and isinstance(diagnostic, dict):
+                    diagnostics[file_id] = (metadata.get("error_code"), diagnostic)
+            def diagnostic_for(item, error_code):
+                saved = diagnostics.get(item.id)
+                return saved[1] if saved and saved[0] == error_code else None
             warnings = dict(session.execute(select(ParsedDocument.file_id, ParsedDocument.warnings).join(
                 UploadedFile, UploadedFile.id == ParsedDocument.file_id).where(UploadedFile.analysis_id == analysis_id)).all())
             return {"analysis": AnalysisService.payload(analysis), "files": [{
@@ -52,6 +65,8 @@ def workspace_router(database: Database) -> APIRouter:
                 "detected_kind": item.detected_kind, "classified_kind": item.classified_kind,
                 "error_code": item.error_code or (
                     "AI_NO_SUPPORTED_FACTS" if item.status == "processed" and not fact_counts.get(item.id) and item.id not in advisory_runs else None),
+                "error_diagnostic": diagnostic_for(item, item.error_code or (
+                    "AI_NO_SUPPORTED_FACTS" if item.status == "processed" and not fact_counts.get(item.id) and item.id not in advisory_runs else None)),
                 "advisory_status": advisory_runs[item.id].execution_status if item.id in advisory_runs else "not_executed",
                 "fact_count": fact_counts.get(item.id, 0), "size_bytes": item.size_bytes,
                 "warnings": [w for w in warnings.get(item.id, []) if w in {"embedded_images_need_vision", "empty_csv"}],

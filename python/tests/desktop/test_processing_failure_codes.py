@@ -41,9 +41,41 @@ def test_local_privacy_failure_is_actionable_and_never_calls_provider(tmp_path):
         assert provider.calls == 0
         assert result["status"] == "failed"
         assert result["files"][0]["error_code"] == "AI_LOCAL_REDACTION_FAILED"
+        assert result["files"][0]["error_diagnostic"] == {"category": "privacy"}
         with app.state.database.session() as session:
             assert session.get(AnalysisBatch, analysis_id).failure_reason == "AI_LOCAL_REDACTION_FAILED"
         assert "synthetic private detail" not in str(result)
+
+
+def test_provider_diagnostic_is_persisted_as_safe_workspace_metadata(tmp_path):
+    from qian_labor.ai.providers import AIDiagnostic, AIProviderError
+
+    class Provider:
+        name = "synthetic-external"
+        is_external = True
+
+        def extract(self, *args, **kwargs):
+            raise AIProviderError("AI_SCHEMA_INVALID", AIDiagnostic(
+                category="json", path="response", validation_type="invalid_json", attempt=1,
+            ))
+
+    token = "synthetic-provider-diagnostic"
+    headers = {"X-Qian-Desktop-Token": token}
+    app = create_desktop_app(data_dir=tmp_path / "data", launch_token=token)
+    source = tmp_path / "synthetic.csv"
+    source.write_text("员工,事实\nSYN-001,合成合同\n", encoding="utf-8")
+    with TestClient(app) as client:
+        aid = client.post("/api/analyses", headers=headers, json={
+            "name": "合成诊断", "company_display_name": "虚构企业",
+        }).json()["id"]
+        client.post(f"/api/analyses/{aid}/import-paths", headers=headers,
+                    json={"paths": [str(source)]})
+        result = ProcessingPipeline(app.state.database, LocalStorage(str(app.state.storage_root)), Provider()).process(aid)
+        diagnostic = result["files"][0]["error_diagnostic"]
+        assert diagnostic == {"category": "json", "attempt": 1, "path": "response", "validation_type": "invalid_json"}
+        assert "SYN-001" not in str(diagnostic)
+        workspace = client.get(f"/api/analyses/{aid}/workspace", headers=headers).json()
+        assert workspace["files"][0]["error_diagnostic"] == diagnostic
 
 
 @pytest.mark.parametrize("terminal_status", ["completed", "partial", "failed"])
@@ -90,6 +122,9 @@ def test_explicit_analysis_retry_reextracts_legacy_empty_success_but_keeps_valid
         assert provider.calls == 1
         material = client.get(f"/api/analyses/{analysis_id}/workspace", headers=headers).json()["files"][0]
         assert material["fact_count"] == 1 and material["error_code"] is None
+        assert material["error_diagnostic"] is None
+        processing = client.get(f"/api/analyses/{analysis_id}/processing", headers=headers).json()
+        assert processing["files"][0]["error_diagnostic"] is None
         with app.state.database.session() as session:
             session.get(AnalysisBatch, analysis_id).status = "completed"
             session.commit()

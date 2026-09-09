@@ -1,11 +1,12 @@
 import type { AnalysisTask } from './useAnalysisTask';
-import { describeOperationError } from '../../lib/errorMessages';
+import { describeOperationDiagnostic, describeOperationError } from '../../lib/errorMessages';
 
 type ProcessingPanelProps = {
   status: string;
   progress: number;
   task?: AnalysisTask;
-  files?: Array<{ id: string; filename: string; status: string; progress?: number; error_code?: string | null }>;
+  files?: Array<{ id: string; filename: string; status: string; progress?: number; error_code?: string | null;
+    error_diagnostic?: { category?: string; status_code?: number; finish_reason?: string; attempt?: number } | null }>;
   onResume?: () => void;
   onRetry?: () => void;
   onMatching?: () => void;
@@ -46,7 +47,8 @@ export function TaskControls({ task, files, onResume, onRetry, onMatching }: Pic
       })() : null}
     </> : <p>材料清单尚待读取，已有材料与已保存结果保留。</p>}
     <p>已经发出的模型请求可能继续消耗额度；取消确认不代表远端请求已停止，也不代表零费用。</p>
-    {task.error ? <p role="alert">{describeOperationError(task.error)}</p> : null}
+      {task.error ? <p role="alert">{describeOperationError(task.error)}</p> : null}
+    {files?.filter(file => file.error_code).map(file => <p key={file.id} role="status">{file.filename}：{file.error_code ? describeOperationError(file.error_code) : null}{file.error_diagnostic ? ` ${describeOperationDiagnostic(file.error_diagnostic) ?? ''}` : ''}</p>)}
     {task.pending ? <p role="alert">操作结果尚未核实，不会重复提交。<button type="button" disabled={task.busy} onClick={task.reconcile}>核对处理状态</button></p> : null}
     <div className="dashboard-actions">
       <button type="button" disabled={task.busy} onClick={task.read}>{!task.data && task.error ? '重试读取任务' : '刷新任务状态'}</button>

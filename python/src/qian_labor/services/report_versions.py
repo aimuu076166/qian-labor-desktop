@@ -23,6 +23,7 @@ from qian_labor.services.effective_facts import effective_projection, public_fac
 from qian_labor.services.finding_sources import owned_finding_evidence
 from qian_labor.services.contract_advisory import ContractAdvisoryService
 from qian_labor.services.report import ReportService
+from qian_labor.services.source_provenance import CITATION_KEY, deterministic_citation_id
 from qian_labor.security.filenames import display_filename
 from qian_labor.sqlite_migrations import assert_no_pending_recovery
 
@@ -115,12 +116,24 @@ class ReportVersionService:
         owner, analysis, company = self.owner(s, company_id, analysis_id)
         files = list(s.scalars(select(UploadedFile).where(UploadedFile.analysis_id == analysis_id).order_by(UploadedFile.id)))
         by_file = {f.id: f for f in files}
-        facts = {f.id: f for f in s.scalars(select(EmploymentFact).where(EmploymentFact.analysis_id == analysis_id))}
+        all_facts = {f.id: f for f in s.scalars(select(EmploymentFact).where(EmploymentFact.analysis_id == analysis_id))}
+        # A current analysis may retain immutable facts from an older parser
+        # grounding contract.  They remain available through history, but the
+        # current report must freeze only the effective (v2) projection so an
+        # obsolete source cannot invalidate a new result.
+        effective_rows = effective_projection(s, analysis_id) if owner.role == "current" else None
+        effective_fact_ids = {row.id for row in effective_rows} if effective_rows is not None else set(all_facts)
+        facts = {fact_id: fact for fact_id, fact in all_facts.items() if fact_id in effective_fact_ids}
         # Include declarations attached to our facts even if a corrupt row moved
         # its analysis_id; a no-findings draft must not silently omit that source.
-        for source in s.scalars(select(SourceLocator).where(or_(SourceLocator.analysis_id == analysis_id, SourceLocator.fact_id.in_(facts)))):
+        # For current analyses, intentionally exclude source rows attached only
+        # to stale facts retained for historical review.
+        source_filter = or_(SourceLocator.fact_id.in_(facts),
+                            SourceLocator.analysis_id == analysis_id if owner.role != "current" else SourceLocator.fact_id.is_(None))
+        for source in s.scalars(select(SourceLocator).where(source_filter)):
             fact = facts.get(source.fact_id) if source.fact_id else None
-            if source.analysis_id != analysis_id or source.file_id not in by_file or not valid_source_metadata(source) or (source.fact_id and (not fact or fact.file_id != source.file_id)):
+            if source.analysis_id != analysis_id or source.file_id not in by_file or not valid_source_metadata(
+                    source, allow_legacy=owner.role == "historical") or (source.fact_id and (not fact or fact.file_id != source.file_id)):
                 raise WorkspaceError("REPORT_SOURCE_INVALID")
         for fact in facts.values():
             employee = s.get(Employee, fact.employee_id) if fact.employee_id else None
@@ -170,8 +183,13 @@ class ReportVersionService:
                 raise WorkspaceError("REPORT_SOURCE_INVALID")
             if PROOF_KEY in location:
                 proof = location[PROOF_KEY]
-                if not isinstance(proof, dict) or proof.get("version") != EXTRACTION_VERSION or proof.get("status") not in {
+                legacy_advisory = owner.role == "historical" and isinstance(proof, dict) and isinstance(proof.get("version"), str) and proof.get("version").startswith("parser-grounding-v")
+                if not isinstance(proof, dict) or (proof.get("version") != EXTRACTION_VERSION and not legacy_advisory) or proof.get("status") not in {
                         "locally_located", "unlocated_needs_review"} or type(proof.get("requires_review", False)) is not bool:
+                    raise WorkspaceError("REPORT_SOURCE_INVALID")
+                file = by_file.get(row.file_id)
+                if file is None or (not legacy_advisory and location.get(CITATION_KEY) != deterministic_citation_id(
+                        file.sha256, location, row.source_excerpt)):
                     raise WorkspaceError("REPORT_SOURCE_INVALID")
             # Existing serializer validates the source digest and ownership after
             # the report boundary validates the shape it is allowed to consume.

@@ -1,4 +1,4 @@
-import { describeOperationError } from '../../lib/errorMessages';
+import { describeOperationDiagnostic, describeOperationError } from '../../lib/errorMessages';
 import type { AssessmentScope } from '../../lib/api';
 import type { ReactNode } from 'react';
 import { importError, type ImportOutcome } from './useNativeImport';
@@ -7,7 +7,8 @@ export type WorkspacePayload = {
   analysis: { id: string; name: string; company_display_name: string; status: string; created_at?: string; assessment_scope?: AssessmentScope };
   files: Array<{ id: string; filename: string; status: string; progress: number;
     detected_kind: string; classified_kind: string; error_code: string | null; size_bytes: number; fact_count?: number;
-    warnings?: string[]; needs_reextraction?: boolean; extraction_version?: string | null }>;
+    warnings?: string[]; needs_reextraction?: boolean; extraction_version?: string | null;
+    error_diagnostic?: { category?: string; status_code?: number; finish_reason?: string; attempt?: number } | null }>;
 };
 
 const FILE_STATUS: Record<string, string> = { uploaded: '待分析', parsing: '正在解析',
@@ -45,6 +46,7 @@ export function MaterialWorkspace({ payload, configured, busy, error, onAdd, onP
     {payload.files.some(file => file.needs_reextraction) ? <p role="status">部分旧版材料尚未完成当前来源核验；明确开始分析后才会重新提取。</p> : null}
     {error ? <p role="alert">{describeOperationError(error)}</p> : null}
     {importResults?.length ? <ImportResults results={importResults} /> : null}
+    {processDisabled ? <p role="status">当前任务正在处理或等待恢复，暂不能添加材料或开始分析；请等待任务结束后再操作。</p> : null}
     <div className="table-scroll"><table className="employee-table"><thead><tr>
       <th>材料</th><th>状态</th><th>识别类型</th><th>已提取事实</th><th>处理信息</th>
     </tr></thead><tbody>{payload.files.map(file => <tr key={file.id}>
@@ -52,6 +54,7 @@ export function MaterialWorkspace({ payload, configured, busy, error, onAdd, onP
       <td>{file.classified_kind === 'unknown' ? '待识别' : file.classified_kind}</td>
       <td>{file.fact_count ?? '—'}</td>
       <td>{file.error_code ? describeOperationError(file.error_code) : '—'}
+        {file.error_diagnostic ? <p className="muted">{describeOperationDiagnostic(file.error_diagnostic)}</p> : null}
         {onSelectAdvisory ? <button type="button" onClick={() => onSelectAdvisory(file.id)}>查看 {file.filename} 条款观察</button> : null}
         {file.warnings?.includes('embedded_images_need_vision') ? <p>内嵌图片尚未提取，请将图片单独导入后分析；已提取文字仍保留。</p> : null}
         {file.warnings?.includes('empty_csv') ? <p>表格没有可提取的内容，请核对原材料。</p> : null}
@@ -61,7 +64,7 @@ export function MaterialWorkspace({ payload, configured, busy, error, onAdd, onP
     {advisoryPanel}
     {taskPanel}
     {!readOnly ? <div className="dashboard-actions">
-      <button type="button" className="secondary-action" onClick={onAdd} disabled={busy}>添加材料</button>
+      <button type="button" className="secondary-action" onClick={onAdd} disabled={busy || processDisabled}>添加材料</button>
       <button type="button" className="primary-action" onClick={onProcess} disabled={busy || processDisabled || !payload.files.length}>
         {processing ? '正在处理…' : configured ? '开始分析' : '配置模型后分析'}
       </button>

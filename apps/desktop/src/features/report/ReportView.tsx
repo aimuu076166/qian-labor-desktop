@@ -133,8 +133,8 @@ export function ReportView({
       <header className="report-header">
         <p className="eyebrow">QIAN LABOR DESKTOP</p>
         <h2 id="report-title">企业用工风险体检报告</h2>
-        <p className="review-note">报告草稿</p>
-        {saved ? <><p>已保存版本 {saved.version} · {saved.id}</p><p>此页为保存时的复核草稿，后续资料或处理修改不会改写本页。</p>
+        <p className="review-note">{saved ? '已保存冻结版本' : '报告草稿'}</p>
+        {saved ? <><p>已保存版本 {saved.version} · {saved.id}</p><p>本页为已保存的冻结版本，后续资料或处理修改不会改写本页。</p>
           <p className="report-signature">内容校验 SHA-256：{saved.content_sha256}</p>
           <p className="report-signature">输入：{saved.input_revision} · 结果：{saved.result_revision ?? '尚无结果'} · 复核：{saved.review_revision}</p></> :
           <p>本页为当前结果，尚未形成锁定版本；补充材料或修改复核决定后，内容可能变化。</p>}

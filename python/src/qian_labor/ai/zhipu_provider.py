@@ -14,7 +14,7 @@ from qian_labor.ai.fact_contract import (
     CANONICAL_FACT_TYPE_SET,
     FACT_VALUE_TYPES,
 )
-from qian_labor.ai.providers import AIProviderError
+from qian_labor.ai.providers import AIDiagnostic, AIProviderError
 from qian_labor.ai.schemas import ExtractionResult, ProviderExtractionResult, UsageRecord, same_json_value
 from qian_labor.security.local_redaction import (
     PreparedProviderContent,
@@ -38,6 +38,8 @@ class ZhipuChatCompletionsProvider:
         1308: "AI_QUOTA_EXCEEDED",
         1309: "AI_PLAN_EXPIRED",
     }
+
+    _MAX_OUTPUT_TOKENS = 8192
 
     def __init__(
         self,
@@ -69,7 +71,11 @@ class ZhipuChatCompletionsProvider:
     def check_connection(self) -> None:
         """Validate this key/model with one small request and no automatic retry burst."""
         if not self.api_key or not self.text_model or not self.base_url:
-            raise AIProviderError("AI_PROVIDER_NOT_CONFIGURED")
+            raise AIProviderError(
+                "AI_PROVIDER_NOT_CONFIGURED",
+                AIDiagnostic(category="configuration"),
+            )
+        started = time.monotonic()
         try:
             response = self.client.post(
                 f"{self.base_url}/chat/completions",
@@ -93,20 +99,46 @@ class ZhipuChatCompletionsProvider:
             )
             response.raise_for_status()
         except httpx.TimeoutException:
-            raise AIProviderError("AI_TIMEOUT") from None
+            raise AIProviderError(
+                "AI_TIMEOUT",
+                AIDiagnostic(
+                    category="timeout",
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    attempt=1,
+                ),
+            ) from None
         except httpx.HTTPStatusError as error:
-            raise AIProviderError(self._failure_code(error.response)) from None
+            response = error.response
+            raise AIProviderError(
+                self._failure_code(response),
+                AIDiagnostic(
+                    category="http",
+                    status_code=response.status_code,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    attempt=1,
+                ),
+            ) from None
         except httpx.TransportError:
-            raise AIProviderError("AI_PROVIDER_ERROR") from None
+            raise AIProviderError(
+                "AI_PROVIDER_ERROR",
+                AIDiagnostic(
+                    category="transport",
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    attempt=1,
+                ),
+            ) from None
 
     def extract(self, filename: str, content: bytes) -> ExtractionResult:
         extension = Path(filename).suffix.lower()
         is_image = extension in self._IMAGE_EXTENSIONS
         model = self.vision_model if is_image else self.text_model
         if not self.api_key or not model or not self.base_url:
-            raise AIProviderError("AI_PROVIDER_NOT_CONFIGURED")
+            raise AIProviderError(
+                "AI_PROVIDER_NOT_CONFIGURED",
+                AIDiagnostic(category="configuration"),
+            )
         if self.batch_budget_usd <= 0:
-            raise AIProviderError("AI_BUDGET_EXCEEDED")
+            raise AIProviderError("AI_BUDGET_EXCEEDED", AIDiagnostic(category="budget"))
 
         if isinstance(content, PreparedProviderContent):
             prepared_filename = filename
@@ -120,7 +152,10 @@ class ZhipuChatCompletionsProvider:
                     external=True,
                 )
             except PrivacyBoundaryError:
-                raise AIProviderError("AI_LOCAL_REDACTION_FAILED") from None
+                raise AIProviderError(
+                    "AI_LOCAL_REDACTION_FAILED",
+                    AIDiagnostic(category="privacy"),
+                ) from None
             prepared_filename = prepared.filename
             prepared_content = prepared.content
 
@@ -134,6 +169,7 @@ class ZhipuChatCompletionsProvider:
         response: httpx.Response | None = None
         attempts = 0
         failure_code: str | None = None
+        failure_diagnostic: AIDiagnostic | None = None
 
         from qian_labor.jobs.control import checkpoint, retry_wait
         for attempts in range(1, self.max_attempts + 1):
@@ -159,6 +195,12 @@ class ZhipuChatCompletionsProvider:
             except (httpx.TransportError, httpx.HTTPStatusError) as error:
                 if isinstance(error, httpx.TimeoutException):
                     failure_code = "AI_TIMEOUT"
+                    failure_diagnostic = AIDiagnostic(
+                        category="timeout",
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                        attempt=attempts,
+                        input_length=len(prepared_content),
+                    )
                     break
                 retryable = not isinstance(error, httpx.HTTPStatusError) or (
                     error.response.status_code == 429 or error.response.status_code >= 500
@@ -169,24 +211,66 @@ class ZhipuChatCompletionsProvider:
                         and error.response.status_code == 429
                     ):
                         failure_code = self._failure_code(error.response)
+                        failure_diagnostic = AIDiagnostic(
+                            category="http",
+                            status_code=error.response.status_code,
+                            elapsed_ms=int((time.monotonic() - started) * 1000),
+                            attempt=attempts,
+                            input_length=len(prepared_content),
+                        )
+                    elif isinstance(error, httpx.HTTPStatusError):
+                        failure_code = "AI_PROVIDER_ERROR"
+                        failure_diagnostic = AIDiagnostic(
+                            category="http",
+                            status_code=error.response.status_code,
+                            elapsed_ms=int((time.monotonic() - started) * 1000),
+                            attempt=attempts,
+                            input_length=len(prepared_content),
+                        )
                     else:
                         failure_code = "AI_PROVIDER_ERROR"
+                        failure_diagnostic = AIDiagnostic(
+                            category="transport",
+                            elapsed_ms=int((time.monotonic() - started) * 1000),
+                            attempt=attempts,
+                            input_length=len(prepared_content),
+                        )
                     break
                 if self.retry_delay_seconds:
                     retry_wait(self.retry_delay_seconds * (2 ** (attempts - 1)))
 
         if failure_code is not None:
-            raise AIProviderError(failure_code) from None
+            raise AIProviderError(failure_code, failure_diagnostic) from None
         if response is None:
-            raise AIProviderError("AI_PROVIDER_ERROR") from None
+            raise AIProviderError(
+                "AI_PROVIDER_ERROR",
+                AIDiagnostic(
+                    category="response",
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    attempt=attempts,
+                    input_length=len(prepared_content),
+                ),
+            ) from None
 
-        result = self._validated_result(response, started, attempts)
+        result, diagnostic = self._validated_result(
+            response, started, attempts, input_length=len(prepared_content)
+        )
         if result is None:
-            raise AIProviderError("AI_SCHEMA_INVALID") from None
+            raise AIProviderError("AI_SCHEMA_INVALID", diagnostic) from None
         if not result.facts and result.contract_advisory is None:
-            raise AIProviderError("AI_NO_SUPPORTED_FACTS") from None
+            raise AIProviderError(
+                "AI_NO_SUPPORTED_FACTS",
+                AIDiagnostic(
+                    category="semantic",
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    attempt=attempts,
+                    input_length=len(prepared_content),
+                    path="facts",
+                    validation_type="empty",
+                ),
+            ) from None
         if result.usage.estimated_cost_usd > self.batch_budget_usd:
-            raise AIProviderError("AI_BUDGET_EXCEEDED")
+            raise AIProviderError("AI_BUDGET_EXCEEDED", AIDiagnostic(category="budget"))
         return result
 
     @classmethod
@@ -276,6 +360,10 @@ class ZhipuChatCompletionsProvider:
                 {"role": "user", "content": user_content},
             ],
             "response_format": {"type": "json_object"},
+            # The provider defaults are not a contract.  A bounded explicit
+            # budget prevents normal 2–4k-character source files from being
+            # cut off before the facts/advisory JSON closes.
+            "max_tokens": ZhipuChatCompletionsProvider._MAX_OUTPUT_TOKENS,
             "stream": False,
         }
 
@@ -285,69 +373,178 @@ class ZhipuChatCompletionsProvider:
         response: httpx.Response,
         started: float,
         attempts: int,
-    ) -> ExtractionResult | None:
+        *,
+        input_length: int = 0,
+    ) -> tuple[ExtractionResult | None, AIDiagnostic]:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        base = dict(elapsed_ms=elapsed_ms, attempt=attempts, input_length=input_length)
         try:
             payload = response.json()
             if not isinstance(payload, dict):
-                raise TypeError
+                return None, AIDiagnostic(category="response", path="response", validation_type="not_object", **base)
             choices = payload.get("choices")
             if not isinstance(choices, list) or not choices:
-                raise TypeError
+                return None, AIDiagnostic(category="response", path="choices", validation_type="empty", **base)
             first = choices[0]
             if not isinstance(first, dict):
-                raise TypeError
+                return None, AIDiagnostic(category="response", path="choices[0]", validation_type="not_object", **base)
             # A provider can return syntactically valid JSON even when the
             # generation ended before the requested contract was complete.
             # Treat known non-terminal reasons as a schema failure instead of
             # persisting a partial extraction as a successful result.
             finish_reason = first.get("finish_reason")
             if finish_reason in {"length", "content_filter", "tool_calls"}:
-                raise ValueError("AI_RESPONSE_INCOMPLETE")
+                return None, AIDiagnostic(
+                    category="incomplete",
+                    finish_reason=finish_reason,
+                    path="choices[0]",
+                    **base,
+                )
             message = first.get("message")
             if not isinstance(message, dict):
-                raise TypeError
+                return None, AIDiagnostic(category="response", path="choices[0].message", validation_type="not_object", **base)
             content = message.get("content")
             if not isinstance(content, str):
-                raise TypeError
-            provider_payload = json.loads(content)
+                return None, AIDiagnostic(category="response", path="choices[0].message.content", validation_type="not_string", **base)
+            output_length = len(content)
+            if not content.strip():
+                return None, AIDiagnostic(
+                    category="response",
+                    path="choices[0].message.content",
+                    validation_type="empty",
+                    output_length=output_length,
+                    **base,
+                )
+            try:
+                provider_payload = json.loads(content)
+            except json.JSONDecodeError:
+                return None, AIDiagnostic(
+                    category="json",
+                    path="choices[0].message.content",
+                    validation_type="invalid_json",
+                    output_length=output_length,
+                    **base,
+                )
             if not isinstance(provider_payload, dict):
-                raise TypeError
+                return None, AIDiagnostic(
+                    category="response",
+                    path="choices[0].message.content",
+                    validation_type="not_object",
+                    output_length=output_length,
+                    **base,
+                )
             facts = provider_payload.get("facts")
+            if facts is None:
+                return None, AIDiagnostic(
+                    category="schema",
+                    path="facts",
+                    validation_type="missing_field",
+                    output_length=output_length,
+                    **base,
+                )
+            if not isinstance(facts, list):
+                return None, AIDiagnostic(
+                    category="schema",
+                    path="facts",
+                    validation_type="not_list",
+                    output_length=output_length,
+                    **base,
+                )
             if isinstance(facts, list):
                 normalized_facts = [cls._normalize_fact_shape(fact) for fact in facts]
                 if any(fact is None for fact in normalized_facts):
-                    raise ValueError("AI_FACT_SHAPE_INVALID")
+                    return None, AIDiagnostic(
+                        category="schema",
+                        path="facts[].value_*",
+                        validation_type="invalid_type",
+                        output_length=output_length,
+                        **base,
+                    )
                 provider_payload = {**provider_payload, "facts": normalized_facts}
-            provider_result = ProviderExtractionResult.model_validate(provider_payload)
+            try:
+                provider_result = ProviderExtractionResult.model_validate(provider_payload)
+            except ValidationError:
+                conflict = any(
+                    isinstance(fact, dict)
+                    and fact.get("value_type")
+                    and sum(fact.get(name) is not None for name in (
+                        "value_text", "value_integer", "value_number", "value_boolean",
+                        "value_string_list", "value_json",
+                    )) > 1
+                    for fact in facts
+                )
+                return None, AIDiagnostic(
+                    category="schema",
+                    path="facts[].value_*" if conflict else "response",
+                    validation_type="conflict" if conflict else "invalid_type",
+                    output_length=output_length,
+                    **base,
+                )
             if any(
                 fact.fact_type not in CANONICAL_FACT_TYPE_SET
                 for fact in provider_result.facts
             ):
-                raise ValueError("AI_FACT_TYPE_UNSUPPORTED")
+                return None, AIDiagnostic(
+                    category="semantic",
+                    path="facts[].fact_type",
+                    validation_type="unsupported",
+                    output_length=output_length,
+                    **base,
+                )
             if any(fact.value_type != "null" and fact.value_type not in FACT_VALUE_TYPES[fact.fact_type]
                    for fact in provider_result.facts):
-                raise ValueError("AI_FACT_VALUE_TYPE_INVALID")
+                return None, AIDiagnostic(
+                    category="semantic",
+                    path="facts[].value_type",
+                    validation_type="invalid_value",
+                    output_length=output_length,
+                    **base,
+                )
             # Never turn invalid or conflicting facts into a successful partial extraction.
             # Explicit null is retained as missing evidence, not silently discarded.
-            result = provider_result.to_extraction_result()
+            try:
+                result = provider_result.to_extraction_result()
+            except ValueError:
+                return None, AIDiagnostic(
+                    category="schema",
+                    path="facts[].value_*",
+                    validation_type="conflict",
+                    output_length=output_length,
+                    **base,
+                )
             for fact in result.facts:
                 if fact.value is None:
                     fact.needs_human_confirmation = True
             usage = payload.get("usage", {})
             if not isinstance(usage, dict):
-                raise TypeError
-            result.usage = UsageRecord(
-                input_tokens=cls._usage_token(usage, "prompt_tokens", result.usage.input_tokens),
-                output_tokens=cls._usage_token(
-                    usage,
-                    "completion_tokens",
-                    result.usage.output_tokens,
-                ),
-                estimated_cost_usd=result.usage.estimated_cost_usd,
-                latency_ms=int((time.monotonic() - started) * 1000),
-                attempts=attempts,
-            )
-            return result
+                return None, AIDiagnostic(
+                    category="schema",
+                    path="usage",
+                    validation_type="not_object",
+                    output_length=output_length,
+                    **base,
+                )
+            try:
+                result.usage = UsageRecord(
+                    input_tokens=cls._usage_token(usage, "prompt_tokens", result.usage.input_tokens),
+                    output_tokens=cls._usage_token(
+                        usage,
+                        "completion_tokens",
+                        result.usage.output_tokens,
+                    ),
+                    estimated_cost_usd=result.usage.estimated_cost_usd,
+                    latency_ms=elapsed_ms,
+                    attempts=attempts,
+                )
+            except (TypeError, ValueError, OverflowError):
+                return None, AIDiagnostic(
+                    category="schema",
+                    path="usage",
+                    validation_type="invalid_type",
+                    output_length=output_length,
+                    **base,
+                )
+            return result, AIDiagnostic(category="response", output_length=output_length, **base)
         except (
             AttributeError,
             json.JSONDecodeError,
@@ -356,7 +553,12 @@ class ZhipuChatCompletionsProvider:
             ValidationError,
             ValueError,
         ):
-            return None
+            return None, AIDiagnostic(
+                category="schema",
+                path="response",
+                validation_type="invalid_type",
+                **base,
+            )
 
     @staticmethod
     def _normalize_fact_shape(fact: object) -> object | None:

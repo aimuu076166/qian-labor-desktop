@@ -44,6 +44,7 @@ type MatchingReviewProps = {
   employeeRecordOptions?: EmployeeRecord[];
   draftCache?: Map<string, MatchingDraft>;
   submitting?: boolean;
+  taskActive?: boolean;
   error?: string | null;
   onDecision: (payload: MatchDecisionPayload) => Promise<void>;
 };
@@ -54,6 +55,15 @@ function suggestedNumber(candidate?: MatchCandidate): string {
     ? ids[0].slice(0, 80) : '';
 }
 
+function isConflict(candidate: MatchCandidate): boolean {
+  return candidate.reasons.some(reason => new Set([
+    'stable_identifier_conflict', 'employee_number_hash_disagreement',
+    'multiple_exact_hash_candidates', 'employee_number_changed',
+    'multiple_employee_ids', 'identity_ambiguous',
+    'multiple_identifier_values', 'stable_hash_confirmation_required',
+  ]).has(reason));
+}
+
 export function MatchingReview(props: MatchingReviewProps) {
   const [selectedId, setSelectedId] = useState(props.candidates[0]?.id ?? '');
   useEffect(() => {
@@ -62,6 +72,26 @@ export function MatchingReview(props: MatchingReviewProps) {
     }
   }, [props.candidates, selectedId]);
   const candidate = props.candidates.find(item => item.id === selectedId) ?? props.candidates[0];
+  const groups = new Map<string, { label: string; candidates: MatchCandidate[] }>();
+  const unknownCount = props.candidates.filter(item => !isConflict(item)
+    && !item.employee_number?.trim() && !item.employee_id?.trim() && !suggestedNumber(item)).length;
+  for (const item of props.candidates) {
+    const number = item.employee_number?.trim() || suggestedNumber(item);
+    const conflict = isConflict(item);
+    const unknownLabel = number || item.material_name || item.file_id || item.id;
+    const key = conflict
+      ? `conflict:${number || item.employee_id?.trim() || item.file_id || item.id}`
+      : number || item.employee_id?.trim() || `unknown:${item.id}`;
+    const label = conflict
+      ? `冲突待核对${number ? ` · ${number}` : ` · ${unknownLabel}`}`
+      : number ? `员工 ${number}`
+      : item.employee_id?.trim() ? `员工 ${item.employee_name}`
+      : unknownCount === 1 ? '未知员工' : `未知员工 · ${unknownLabel}`;
+    const group = groups.get(key) ?? { label, candidates: [] };
+    group.candidates.push(item);
+    groups.set(key, group);
+  }
+  const interactionDisabled = Boolean(props.submitting || props.taskActive);
   if (!candidate) return <section className="status-card" aria-label="matching-review-empty">
     <p>正在确认匹配结果…</p>
   </section>;
@@ -71,16 +101,24 @@ export function MatchingReview(props: MatchingReviewProps) {
         <p className="eyebrow">人工匹配</p>
         <h2 id="matching-review-title">请先确认员工匹配</h2>
         <p className="muted">还有 {props.candidates.length} 项匹配事项。按员工和材料逐项核对，全部确认后才会继续风险计算。</p>
+        {props.taskActive ? <p role="alert">任务正在处理，当前不能确认员工归属或新建员工；请等待当前任务结束后再操作。</p> : null}
       </div>
     </div>
     <ol className="matching-candidate-list" aria-label="待确认匹配事项">
-      {props.candidates.map(item => <li key={item.id}>
-        <button type="button" className={item.id === candidate.id ? 'selected' : ''}
-          aria-current={item.id === candidate.id ? 'true' : undefined}
-          onClick={() => setSelectedId(item.id)} disabled={props.submitting}>
-          <span>{item.employee_name}{item.employee_number ? ` · ${item.employee_number}` : ''}</span>
-          <small>{item.material_name ?? '未命名材料'} · {item.fact_ids.length} 条事实</small>
-        </button>
+      {[...groups.values()].map(group => <li key={group.label}>
+        <section role="group" aria-label={group.label}>
+          <h3>{group.label}</h3>
+          <ol>
+            {group.candidates.map(item => <li key={item.id}>
+              <button type="button" className={item.id === candidate.id ? 'selected' : ''}
+                aria-current={item.id === candidate.id ? 'true' : undefined}
+                onClick={() => setSelectedId(item.id)} disabled={interactionDisabled}>
+                <span>{item.employee_name}{item.employee_number ? ` · ${item.employee_number}` : ''}</span>
+                <small>{item.material_name ?? '未命名材料'} · {item.fact_ids.length} 条事实</small>
+              </button>
+            </li>)}
+          </ol>
+        </section>
       </li>)}
     </ol>
     <CandidateReview key={candidate.id} {...props} candidate={candidate} />
@@ -90,6 +128,7 @@ export function MatchingReview(props: MatchingReviewProps) {
 function CandidateReview({
   candidate, error, currentCompanyId, employeeRecordOptions = [], draftCache,
   submitting = false,
+  taskActive = false,
   onDecision,
 }: MatchingReviewProps & { candidate: MatchCandidate }) {
   const [employeeId, setEmployeeId] = useState(
@@ -100,6 +139,7 @@ function CandidateReview({
   useEffect(() => { draftCache?.set(candidate.id, { employeeId, displayName, employeeNumber }); }, [draftCache, candidate.id, employeeId, displayName, employeeNumber]);
   const selectedRecord = employeeRecordOptions.find(item => item.id === employeeId);
 
+  const interactionDisabled = submitting || taskActive;
   return (
     <section className="match-card" aria-label="当前匹配事项">
       {error ? <p role="alert">{error === 'MATCH_EMPLOYEE_NUMBER_EXISTS' || error === 'WORKSPACE_EMPLOYEE_NUMBER_EXISTS'
@@ -122,7 +162,7 @@ function CandidateReview({
         </label>
         <select
           id="match-employee"
-          disabled={submitting}
+          disabled={interactionDisabled}
           value={employeeId}
           onChange={(event) => setEmployeeId(event.target.value)}
         >
@@ -143,7 +183,7 @@ function CandidateReview({
         </label>
         <input
           id="match-new-display-name"
-          disabled={submitting}
+          disabled={interactionDisabled}
           value={displayName}
           maxLength={100}
           placeholder={currentCompanyId ? '用于企业本地员工档案' : '仅用于本次本地分析'}
@@ -151,7 +191,7 @@ function CandidateReview({
         />
 
         <label className="field-label" htmlFor="match-new-number">确认工号（可选）</label>
-        <input id="match-new-number" value={employeeNumber} maxLength={80} disabled={submitting}
+        <input id="match-new-number" value={employeeNumber} maxLength={80} disabled={interactionDisabled}
           placeholder="核对原材料后填写；不确定可以留空"
           onChange={(event) => setEmployeeNumber(event.target.value)} />
         <p className="muted">工号用于将后续材料对应到同一员工。已有相同工号时，请选择上方归属员工。</p>
@@ -160,7 +200,7 @@ function CandidateReview({
           <button
             type="button"
             className="primary-action"
-            disabled={submitting || !employeeId}
+            disabled={interactionDisabled || !employeeId}
             onClick={() =>
               onDecision({
                 candidate_id: candidate.id,
@@ -176,7 +216,7 @@ function CandidateReview({
           <button
             type="button"
             className="secondary-action"
-            disabled={submitting || !displayName.trim()}
+            disabled={interactionDisabled || !displayName.trim()}
             onClick={() =>
               onDecision({
                 candidate_id: candidate.id,
@@ -193,7 +233,7 @@ function CandidateReview({
             <button
               type="button"
               className="secondary-action"
-              disabled={submitting}
+              disabled={interactionDisabled}
               onClick={() =>
                 onDecision({
                   candidate_id: candidate.id,
@@ -210,7 +250,7 @@ function CandidateReview({
           <button
             type="button"
             className="text-action"
-            disabled={submitting}
+            disabled={interactionDisabled}
             onClick={() =>
               onDecision({
                 candidate_id: candidate.id,

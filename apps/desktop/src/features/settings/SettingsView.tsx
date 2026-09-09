@@ -29,11 +29,15 @@ const ZHIPU_CODING_PLAN_BASE_URL = 'https://open.bigmodel.cn/api/coding/paas/v4'
 
 const PROVIDER_ERROR_MESSAGES: Record<string, string> = {
   AI_ACCOUNT_ARREARS:
-    '当前 Key 在所选接口没有可用额度。Coding Plan 用户请选择 Coding Plan 通道。',
+    '接口返回账户额度不可用（1113）。请确认这里使用的是 Coding Plan 专属 Key，并选择 Coding Plan 通道；标准 API Key 与套餐 Key 不通用。',
   AI_RATE_LIMIT: '请求过于频繁，请等待一分钟后重试。',
   AI_PROVIDER_OVERLOADED: '智谱模型当前访问量过大，请稍后重试。',
   AI_QUOTA_EXCEEDED: '智谱额度已用完，请检查账户额度或等待重置。',
   AI_PLAN_EXPIRED: '智谱套餐已到期，请续订后重试。',
+  AI_TIMEOUT: '连接等待超时，本次未发送企业或员工材料；请稍后重试。',
+  AI_PROVIDER_NOT_CONFIGURED: '模型配置不完整，请检查 API Key、模型和计费通道。',
+  AI_SCHEMA_INVALID: '连接返回内容未通过结构校验，未作为有效结果采用；可稍后重试。',
+  AI_LOCAL_REDACTION_FAILED: '本地图片识别或脱敏失败，材料未发送。',
   AI_PROVIDER_ERROR: '智谱连接失败，请检查 API Key 与账户状态。',
 };
 

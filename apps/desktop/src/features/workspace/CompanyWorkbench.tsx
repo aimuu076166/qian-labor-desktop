@@ -13,7 +13,8 @@ export function CompanyWorkbench({ payload, filters, onFilters, onSelectEmployee
       <p>{!analysis ? '尚未导入企业材料' : analysis.stale ? '当前材料待分析或处理中，风险结果待更新' : '当前材料分析完成'}</p>
       <AssessmentRevisionStatus revision={analysis?.assessment_revision} />
     </div><button type="button" className="primary-action" onClick={onImport} disabled={busy}>选择企业材料</button></div>
-    {payload.pending_identity_count > 0 ? <p>有 {payload.pending_identity_count} 项材料待确认归属 <button type="button" onClick={onMatching}>确认员工匹配</button></p> : null}
+    {payload.pending_identity_count > 0 ? <p>有 {payload.pending_identity_count} 项材料待确认归属 <button type="button" disabled={busy} onClick={onMatching}>确认员工匹配</button>
+      {busy ? <span role="status">任务正在处理，完成后才能确认员工匹配。</span> : null}</p> : null}
     {priorities}
     <div className="employee-filters">
       <label>搜索员工<input aria-label="搜索员工" value={filters.search} onChange={e => onFilters({ search: e.target.value, page: 1 })} /></label>

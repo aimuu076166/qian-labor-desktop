@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from qian_labor.jobs.processing import ProcessingPipeline
 from qian_labor.parsers.protocols import ParsedBlock, ParsedDocument
 
@@ -44,3 +46,45 @@ def test_embedded_vision_input_keeps_parser_owned_context():
     assert vision.filename.endswith("-image-1.png")
     assert vision.content == b"synthetic-image"
     assert vision.blocks[0].locator == {"paragraph": 2, "image": 1}
+
+
+def test_chunk_boundary_keeps_employee_and_date_in_same_table_row():
+    identity = ParsedBlock("SYN-001", "table_cell", {"table": 1, "row": 1, "column": 1})
+    value = ParsedBlock("2026-01-01", "table_cell", {"table": 1, "row": 1, "column": 2})
+    parsed = ParsedDocument("docx", [
+        ParsedBlock("A" * 15_866, "paragraph", {"paragraph": 1}),
+        identity,
+        value,
+    ])
+
+    inputs = ProcessingPipeline._extraction_inputs("synthetic.docx", b"", parsed)
+
+    identity_chunk = next(index for index, item in enumerate(inputs) if identity in item.blocks)
+    value_chunk = next(index for index, item in enumerate(inputs) if value in item.blocks)
+    assert identity_chunk == value_chunk
+
+
+@pytest.mark.parametrize(
+    ("kind", "row_prefix"),
+    [
+        ("spreadsheet", {"sheet": "CSV"}),
+        ("spreadsheet", {"sheet": "员工"}),
+        ("docx", {"table": 1}),
+    ],
+)
+def test_row_atom_is_preserved_for_csv_xlsx_and_docx_table(kind, row_prefix):
+    identity = ParsedBlock("SYN-001", "cell" if kind == "spreadsheet" else "table_cell",
+                           {**row_prefix, "row": 2, "column": 1})
+    value = ParsedBlock("2026-01-01", "cell" if kind == "spreadsheet" else "table_cell",
+                        {**row_prefix, "row": 2, "column": 2})
+    parsed = ParsedDocument(kind, [
+        ParsedBlock("A" * 15_866, "paragraph", {"paragraph": 1}),
+        identity,
+        value,
+    ])
+
+    inputs = ProcessingPipeline._extraction_inputs("synthetic.txt", b"", parsed)
+
+    assert next(index for index, item in enumerate(inputs) if identity in item.blocks) == next(
+        index for index, item in enumerate(inputs) if value in item.blocks
+    )

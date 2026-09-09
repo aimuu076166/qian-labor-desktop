@@ -217,6 +217,114 @@ def test_zhipu_provider_rejects_parseable_json_when_generation_is_truncated() ->
         _provider(handler).extract("虚构合同.txt", b"fictional contract")
 
 
+def test_zhipu_diagnostic_marks_truncated_json_as_incomplete_without_response_text() -> None:
+    payload = _success_response().json()
+    assert isinstance(payload, dict)
+    payload["choices"][0]["finish_reason"] = "length"
+    payload["choices"][0]["message"]["content"] = '{"synthetic-person-text":"synthetic-secret-marker"}'
+
+    with pytest.raises(AIProviderError) as caught:
+        _provider(lambda _request: httpx.Response(200, json=payload)).extract(
+            "虚构合同.txt", b"synthetic-person-text"
+        )
+
+    error = caught.value
+    assert error.diagnostic.category == "incomplete"
+    assert error.diagnostic.finish_reason == "length"
+    assert "synthetic-secret-marker" not in repr(error)
+    assert "synthetic-person-text" not in repr(error.diagnostic.as_dict())
+
+
+@pytest.mark.parametrize(
+    ("content", "category", "validation_type", "path"),
+    [
+        ("", "response", "empty", "choices[0].message.content"),
+        ("[]", "response", "not_object", "choices[0].message.content"),
+        ('{"synthetic-secret-marker":true}', "semantic", "unsupported", "facts[].fact_type"),
+    ],
+)
+def test_zhipu_diagnostic_classifies_safe_response_failures(
+    content: str, category: str, validation_type: str, path: str
+) -> None:
+    payload = _success_response().json()
+    assert isinstance(payload, dict)
+    if content == "":
+        payload["choices"][0]["message"]["content"] = ""
+    elif content == "[]":
+        payload["choices"][0]["message"]["content"] = content
+    else:
+        invalid = _provider_payload()
+        invalid["facts"][0]["fact_type"] = "synthetic-secret-marker"
+        payload["choices"][0]["message"]["content"] = json.dumps(invalid)
+
+    with pytest.raises(AIProviderError) as caught:
+        _provider(lambda _request: httpx.Response(200, json=payload), max_attempts=1).extract(
+            "虚构合同.txt", b"synthetic-person-text"
+        )
+
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.category == category
+    assert diagnostic.validation_type == validation_type
+    assert diagnostic.path == path
+    assert "synthetic-secret-marker" not in repr(diagnostic.as_dict())
+
+
+def test_zhipu_diagnostic_marks_conflicting_value_fields_without_pydantic_details() -> None:
+    payload = _provider_payload()
+    payload["facts"][0]["value_text"] = "synthetic-person-text"
+    with pytest.raises(AIProviderError) as caught:
+        _provider(lambda _request: _success_response(payload), max_attempts=1).extract(
+            "虚构合同.txt", b"synthetic-person-text"
+        )
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.category == "schema"
+    assert diagnostic.validation_type == "conflict"
+    assert diagnostic.path == "facts[].value_*"
+    assert "synthetic-person-text" not in repr(diagnostic.as_dict())
+
+
+@pytest.mark.parametrize(
+    ("status", "category"),
+    [(401, "http"), (429, "http"), (500, "http")],
+)
+def test_zhipu_diagnostic_marks_http_status_without_error_body(status: int, category: str) -> None:
+    with pytest.raises(AIProviderError) as caught:
+        _provider(
+            lambda _request: httpx.Response(
+                status, json={"error": {"message": "synthetic-secret-marker"}}
+            ),
+            max_attempts=1,
+        ).extract("虚构合同.txt", b"synthetic-person-text")
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.category == category
+    assert diagnostic.status_code == status
+    assert "synthetic-secret-marker" not in repr(diagnostic.as_dict())
+
+
+def test_zhipu_diagnostic_marks_timeout_and_does_not_retry_read_timeout() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("synthetic-person-text", request=request)
+
+    with pytest.raises(AIProviderError) as caught:
+        _provider(handler, max_attempts=3).extract("虚构合同.txt", b"synthetic-person-text")
+    assert attempts == 1
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.category == "timeout"
+    assert diagnostic.attempt == 1
+    assert "synthetic-person-text" not in repr(diagnostic.as_dict())
+
+
+def test_zhipu_request_sets_a_bounded_output_budget_for_contract_and_spreadsheet() -> None:
+    request = ZhipuChatCompletionsProvider._request_payload(
+        "synthetic.xlsx-part-1.txt", b"SYN-001 | 2026-01-01", MODEL, False
+    )
+    assert request["max_tokens"] >= 4096
+
+
 def test_zhipu_provider_normalizes_the_observed_glm_value_json_key_truncation() -> None:
     payload = _provider_payload()
     fact = payload["facts"][0]

@@ -11,7 +11,10 @@ class ParsedBlock:
 
 @dataclass(frozen=True)
 class VisionPage:
-    page: int
+    # PDF/image pages have a physical page number.  An embedded DOCX image
+    # has only a parser-owned paragraph/table/image locator, so page is absent
+    # rather than fabricated as page 1.
+    page: int | None
     media_type: str
     image_bytes: bytes
     width: int

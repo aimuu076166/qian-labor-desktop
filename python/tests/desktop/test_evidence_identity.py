@@ -65,3 +65,35 @@ def test_same_date_for_another_employee_does_not_ground_a_fact():
 
     assert proofs[0]["status"] == "unlocated_needs_review"
     assert extracted.facts[0].needs_human_confirmation
+
+
+def test_citation_id_is_deterministic_and_binds_file_position_and_block():
+    from qian_labor.services.source_provenance import deterministic_citation_id
+
+    location = {"paragraph": 2, "image": 1, "bbox": [1, 2, 30, 40]}
+    first = deterministic_citation_id("a" * 64, location, "SYN-001 合同图像")
+    assert first == deterministic_citation_id("a" * 64, dict(location), "SYN-001 合同图像")
+    assert first != deterministic_citation_id("b" * 64, location, "SYN-001 合同图像")
+    assert first != deterministic_citation_id("a" * 64, {**location, "image": 2}, "SYN-001 合同图像")
+    assert first != deterministic_citation_id("a" * 64, location, "SYN-002 合同图像")
+
+
+def test_current_grounding_requires_a_valid_citation_id():
+    import hashlib
+    from types import SimpleNamespace
+    from qian_labor.services.effective_facts import valid_source_metadata
+    from qian_labor.services.source_provenance import deterministic_citation_id
+
+    file = SimpleNamespace(sha256="a" * 64)
+    excerpt = "SYN-001 合同图像"
+    location = {"paragraph": 2, "_grounding": {
+        "version": "parser-grounding-v2", "status": "locally_located", "requires_review": False,
+    }}
+    location["_citation_id"] = deterministic_citation_id(file.sha256, location, excerpt)
+    source = SimpleNamespace(location=location, excerpt=excerpt,
+                             content_hash=hashlib.sha256(excerpt.encode()).hexdigest(), file=file)
+    assert valid_source_metadata(source)
+    source.location["_citation_id"] = "cite-forged"
+    assert not valid_source_metadata(source)
+    source.location.pop("_citation_id")
+    assert not valid_source_metadata(source)

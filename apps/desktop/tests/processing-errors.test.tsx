@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { expect, it } from 'vitest';
-import { describeOperationError } from '../src/lib/errorMessages';
+import { describeOperationDiagnostic, describeOperationError } from '../src/lib/errorMessages';
 import { MaterialWorkspace } from '../src/features/workspace/MaterialWorkspace';
 
 it('explains a local redaction failure without asking the user to change their API key', () => {
@@ -17,6 +17,12 @@ it('distinguishes request timeouts and never renders unknown raw error content',
   expect(describeOperationError('AI_TIMEOUT')).not.toContain('欠费');
   expect(describeOperationError('DESKTOP_REQUEST_TIMEOUT')).toContain('操作可能仍在后台进行');
   expect(describeOperationError('synthetic-private-path-and-secret')).not.toContain('synthetic-private');
+});
+
+it('renders only the safe provider diagnostic category and bounded fields', () => {
+  expect(describeOperationDiagnostic({ category: 'json' })).toContain('有效 JSON');
+  expect(describeOperationDiagnostic({ category: 'http', status_code: 429, attempt: 2 })).toContain('HTTP 429');
+  expect(describeOperationDiagnostic({ category: 'synthetic-secret-marker' })).toBeNull();
 });
 
 it('shows zero extracted facts as an actionable empty result rather than evidence of no risk', () => {

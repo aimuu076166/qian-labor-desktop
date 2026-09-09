@@ -149,7 +149,7 @@ def _trace_case():
                 "provenance": "locally_located"} for i in range(2)]
     bindings = {source["id"]: {
         **source, "source_analysis_id": "analysis", "fact_analysis_id": "analysis",
-        "location": {"paragraph": 2, "_grounding": {"version": "parser-grounding-v1", "status": "locally_located", "requires_review": False}},
+        "location": {"paragraph": 2, "_grounding": {"version": "parser-grounding-v2", "status": "locally_located", "requires_review": False}},
         "file_analysis_id": "analysis", "employee_id": "employee",
         "fact_file_id": "fixture-file", "fact_type": kind, "value": value,
     } for source, (kind, value) in zip(sources, [

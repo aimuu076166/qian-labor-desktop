@@ -38,3 +38,15 @@ def test_embedded_image_has_a_vision_input_not_only_a_warning():
     assert len(parsed.vision_pages) >= 1
     assert all(page.image_bytes for page in parsed.vision_pages)
     assert any("SYN-001" in block.text for block in parsed.blocks)
+
+
+def test_docx_embedded_image_has_context_but_no_invented_physical_page():
+    materials = build_materials()
+    parsed = ParserRegistry().parse(
+        "08-嵌图合同待核对.docx",
+        materials["08-嵌图合同待核对.docx"],
+    )
+    image = parsed.vision_pages[0]
+    assert image.page is None
+    assert image.locator["paragraph"] == 2
+    assert image.locator["image"] == 1

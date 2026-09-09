@@ -348,6 +348,20 @@ def test_malformed_advisory_proof_keeps_saved_reports_readable_and_refuses_gener
         assert s.execute(text('SELECT payload_json FROM report_versions')).scalar_one() == original
 
 
+def test_forged_current_advisory_citation_refuses_new_report_but_keeps_saved_snapshot(api, tmp_path):
+    client, db, c, rec, aid, base = prepared(api, tmp_path)
+    body, saved = generate(client, base + '/report-versions')
+    add_report_observation(db, aid, {
+        'paragraph': 2,
+        '_grounding': {'version': 'parser-grounding-v2', 'status': 'locally_located', 'requires_review': False},
+        '_citation_id': 'cite-forged',
+    })
+    listing = context(client, base + '/report-versions')
+    assert listing['current_context_available'] is False
+    assert client.post(base + '/report-versions', json={**body, 'request_id': str(uuid4())}).json()['request']['error_code'] == 'REPORT_SOURCE_INVALID'
+    assert context(client, base + '/report-versions/' + saved['snapshot']['id'])['snapshot'] == saved['snapshot']
+
+
 def location_report_fixture():
     """Actual service payload shared with the renderer regression, entirely in memory."""
     from contextlib import nullcontext
@@ -358,9 +372,10 @@ def location_report_fixture():
     from qian_labor.database import create_database
     from qian_labor.models.core import CompanyWorkspace, CompanyAnalysisBinding, Employee, UploadedFile, EmploymentFact
     from qian_labor.services.report_versions import ReportVersionService, GenerateReportRequest
+    from qian_labor.services.source_provenance import deterministic_citation_id
     db = create_database('sqlite+pysqlite:///:memory:', create_schema=True)
     location = {'sheet': '合成联系人13800138000', 'column': '合成列13900139000', 'row': 2,
-        '_grounding': {'version': 'parser-grounding-v1', 'status': 'locally_located', 'requires_review': True}}
+        '_grounding': {'version': 'parser-grounding-v2', 'status': 'locally_located', 'requires_review': True}}
     workbook = Workbook()
     workbook.active.title = location['sheet']
     workbook.active.append([location['column']])
@@ -381,6 +396,7 @@ def location_report_fixture():
                 size_bytes=len(stream.getvalue()), sha256=hashlib.sha256(stream.getvalue()).hexdigest(), status='processed')
             s.add_all([employee, file])
             s.flush()
+            location['_citation_id'] = deterministic_citation_id(file.sha256, location, '合成条款')
             fact = EmploymentFact(id='13800138-0000-4000-8000-000000000001', analysis_id=analysis.id, employee_id=employee.id,
                 file_id=file.id, fact_type='employment.contract.exists', value_json=True, normalized_value_json=True,
                 extraction_method='synthetic', confidence=1, dedupe_key=str(uuid4()))

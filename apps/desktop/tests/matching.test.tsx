@@ -16,7 +16,7 @@ function candidate(overrides: Partial<MatchCandidate> = {}): MatchCandidate {
     extracted_fields: { fact_ids: ['fact-one'] },
     fact_ids: ['fact-one'],
     score: 0.72,
-    reasons: ['multiple_identifier_values'],
+    reasons: ['workspace_identity_confirmation_required'],
     status: 'pending',
     employee_options: [
       {
@@ -135,6 +135,57 @@ describe('MatchingReview', () => {
     expect(screen.getByText('另一份虚构材料.xlsx')).toBeInTheDocument();
     expect(screen.getByLabelText('确认工号（可选）')).toHaveValue('F-002');
   });
+
+  it('groups pending materials by stable employee identity while preserving material-level review', () => {
+    const onDecision = vi.fn();
+    render(<MatchingReview candidates={[
+      candidate({ id: 'same-employee-1', material_name: '同员工合同.docx', employee_number: 'F-001' }),
+      candidate({ id: 'same-employee-2', material_name: '同员工社保.pdf', employee_number: 'F-001' }),
+      candidate({ id: 'unknown-employee', material_name: '未识别材料.xlsx', employee_id: null, employee_name: '未识别人员', employee_number: null, employee_options: [] }),
+    ]} onDecision={onDecision} />);
+
+    expect(screen.getByRole('group', { name: '员工 F-001' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: '未知员工' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /同员工合同\.docx/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /同员工社保\.pdf/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /未识别材料\.xlsx/ })).toBeInTheDocument();
+  });
+
+  it('disables matching decisions while an analysis task is active and explains why', () => {
+    const onDecision = vi.fn();
+    render(<MatchingReview candidates={[candidate()]} taskActive onDecision={onDecision} />);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('任务正在处理');
+    expect(screen.getByRole('button', { name: '确认归属' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '创建未识别员工' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '暂不归属员工' })).toBeDisabled();
+    expect(screen.getByLabelText('新建人员显示名')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: /虚构待匹配材料\.docx/ }));
+    expect(onDecision).not.toHaveBeenCalled();
+  });
+
+  it('keeps identifier conflicts separate from ordinary employee material and does not collapse unknown files', () => {
+    const onDecision = vi.fn();
+    render(<MatchingReview candidates={[
+      candidate({ id: 'ordinary-f001', material_name: '普通材料.docx', reasons: ['workspace_identity_confirmation_required'] }),
+      candidate({ id: 'conflict-f001', material_name: '冲突材料.docx', reasons: ['stable_identifier_conflict'] }),
+      candidate({ id: 'unknown-a', material_name: '未知甲.xlsx', employee_id: null, employee_number: null, employee_name: '未识别人员', employee_options: [], extracted_fields: { fact_ids: ['a'] } }),
+      candidate({ id: 'unknown-b', material_name: '未知乙.xlsx', employee_id: null, employee_number: null, employee_name: '未识别人员', employee_options: [], extracted_fields: { fact_ids: ['b'] } }),
+    ]} onDecision={onDecision} />);
+
+    expect(screen.getByRole('group', { name: '员工 F-001' })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /冲突待核对.*F-001/ })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /未知员工.*未知甲.xlsx/ })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: /未知员工.*未知乙.xlsx/ })).toBeInTheDocument();
+  });
+
+  it.each(['multiple_identifier_values', 'stable_hash_confirmation_required'])
+    ('groups %s as an explicit conflict', (reason) => {
+      const onDecision = vi.fn();
+      render(<MatchingReview candidates={[candidate({ reasons: [reason] })]} onDecision={onDecision} />);
+      expect(screen.getByRole('group', { name: /冲突待核对.*F-001/ })).toBeInTheDocument();
+      expect(screen.queryByRole('group', { name: '员工 F-001' })).not.toBeInTheDocument();
+    });
 
   it('merges a duplicate source employee into the selected target', async () => {
     const onDecision = vi.fn(async () => undefined);

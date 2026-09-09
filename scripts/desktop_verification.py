@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import os
 import queue
@@ -76,6 +77,16 @@ def _fixture_text() -> str:
         },
     }
     return "QIAN_SYNTHETIC_JSON=" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _expected_citation_id(file_sha256: str, location: dict[str, Any], excerpt: str) -> str:
+    """Independent source identity oracle for the built-sidecar contract."""
+    public_location = {key: value for key, value in location.items()
+                       if key not in {"_grounding", "_citation_id"}}
+    canonical = json.dumps(public_location, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    block_hash = hashlib.sha256(excerpt.encode()).hexdigest()
+    digest = hashlib.sha256(f"{file_sha256}\0{canonical}\0{block_hash}".encode()).hexdigest()
+    return f"cite-{digest[:32]}"
 
 
 def _write_fixture(path: Path) -> None:
@@ -266,6 +277,7 @@ def _source_bindings(data_dir: Path) -> dict[str, dict[str, Any]]:
                        f.analysis_id AS fact_analysis_id, f.employee_id,
                        f.file_id AS fact_file_id, f.fact_type, f.normalized_value_json,
                        u.analysis_id AS file_analysis_id, u.original_filename AS file_name,
+                       u.sha256 AS file_sha256,
                        u.classified_kind, f.verification_status, a.assessment_profile
                 FROM source_locators s
                 JOIN employment_facts f ON f.id = s.fact_id
@@ -301,8 +313,14 @@ def _verify_source_trace(
     expected_excerpt = fixture_excerpt if fixture_excerpt is not None else _fixture_text()
     public_location = {"paragraph": 2}
     stored_location = {"paragraph": 2, "_grounding": {
-        "version": "parser-grounding-v1", "status": "locally_located", "requires_review": False,
+        "version": "parser-grounding-v2", "status": "locally_located", "requires_review": False,
     }}
+    fixture_sha256 = next((binding.get("file_sha256") for binding in bindings.values()
+                           if binding.get("file_id") == fixture_file_id), None)
+    expected_citation = (_expected_citation_id(fixture_sha256, stored_location, expected_excerpt)
+                         if isinstance(fixture_sha256, str) else None)
+    if expected_citation is not None:
+        stored_location["_citation_id"] = expected_citation
     for detail in details:
         sources = detail.get("sources", [])
         required = required_by_rule.get(detail.get("rule_id"))
@@ -337,6 +355,7 @@ def _verify_source_trace(
                                "locator_type": "paragraph", "excerpt": expected_excerpt,
                            }.items())
                     or source.get("location") != public_location
+                    or (expected_citation is not None and source.get("citation_id") != expected_citation)
                     or source.get("provenance") != "locally_located"
                     or binding["location"] != stored_location):
                 raise VerificationError("SOURCE_TRACE_INVALID")
@@ -366,8 +385,12 @@ def _verify_report_sources(
         raise VerificationError("REPORT_INCONSISTENT")
     for item in report_findings:
         detail = verified[item["id"]]
-        expected = [{key: source[key] for key in ("file_name", "locator_type", "location", "excerpt", "provenance")}
-                    for source in detail["sources"]]
+        expected = []
+        for source in detail["sources"]:
+            fields = ["file_name", "locator_type", "location", "excerpt", "provenance"]
+            if "citation_id" in source:
+                fields.append("citation_id")
+            expected.append({key: source[key] for key in fields})
         if (item.get("sources") != expected or item.get("rule_id") != detail["rule_id"]
                 or item.get("assessment_status") != detail["assessment_status"]):
             raise VerificationError("REPORT_INCONSISTENT")

@@ -53,7 +53,7 @@ def test_advisory_grounding_is_separate_preserves_multiple_real_positions():
     assert result.facts == []
     assert [row.source.paragraph for row in rows] == [1, 2]
     assert all(row.proof["requires_review"] for row in rows)
-    assert all(row.proof["version"] == "parser-grounding-v1" for row in rows)
+    assert all(row.proof["version"] == "parser-grounding-v2" for row in rows)
     assert all(row.source.file_name == "contract.docx" for row in rows)
 
 
@@ -69,7 +69,7 @@ def test_advisory_invented_source_is_unlocated(quote, position):
 
 
 def test_combined_cache_identity_keeps_grounding_version():
-    assert ProcessingPipeline._job_key("a", "f", "extract", "sha") == "a:f:extract:sha:parser-grounding-v1:contract-advisory-v1"
+    assert ProcessingPipeline._job_key("a", "f", "extract", "sha") == "a:f:extract:sha:parser-grounding-v2:contract-advisory-v1"
     assert ProcessingPipeline._job_key("a", "f", "parse", "sha") == "a:f:parse:sha"
 
 

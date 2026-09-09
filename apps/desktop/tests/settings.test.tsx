@@ -117,7 +117,8 @@ describe('SettingsView', () => {
       />,
     );
 
-    expect(screen.getByRole('alert')).toHaveTextContent('当前 Key 在所选接口没有可用额度');
+    expect(screen.getByRole('alert')).toHaveTextContent('Coding Plan 专属 Key');
+    expect(screen.getByRole('alert')).toHaveTextContent('标准 API Key 与套餐 Key 不通用');
     expect(screen.getByRole('alert')).toHaveTextContent('AI_ACCOUNT_ARREARS');
     expect(screen.queryByText(/never expose this body/)).not.toBeInTheDocument();
   });

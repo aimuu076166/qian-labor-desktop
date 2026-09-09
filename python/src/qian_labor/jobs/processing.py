@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 
 from qian_labor.ai.providers import (
     AIProvider,
+    AIDiagnostic,
     AIProviderError,
     FakeAIProvider,
     OpenAIResponsesProvider,
@@ -31,6 +32,7 @@ from qian_labor.models.core import (
     ProcessingJob,
     UploadedFile,
     CompanyAnalysisBinding, EmployeeSnapshotBinding,
+    AuditEvent,
 )
 from qian_labor.models.core import (
     ParsedBlock as ParsedBlockModel,
@@ -53,6 +55,7 @@ from qian_labor.security.local_redaction import (
 from qian_labor.security.masking import mask_identity, mask_sensitive
 from qian_labor.services.risk_evaluation import RiskEvaluationService
 from qian_labor.services.company_workspaces import require_material_mutation
+from qian_labor.services.source_provenance import CITATION_KEY, deterministic_citation_id
 from qian_labor.settings import Settings
 from qian_labor.storage.local import LocalStorage
 
@@ -137,23 +140,26 @@ class ProcessingPipeline:
             except PrivacyBoundaryError:
                 failures += 1
                 failure_codes.append("AI_LOCAL_REDACTION_FAILED")
-                self._mark_file_failed(uploaded_file.id, "AI_LOCAL_REDACTION_FAILED")
+                self._mark_file_failed(uploaded_file.id, "AI_LOCAL_REDACTION_FAILED",
+                                        AIDiagnostic(category="privacy"))
             except AIProviderError as error:
                 failures += 1
                 error_code = str(error)
                 if not re.fullmatch(r"AI_[A-Z0-9_]+", error_code):
                     error_code = "PROCESSING_FILE_FAILED"
                 failure_codes.append(error_code)
-                self._mark_file_failed(uploaded_file.id, error_code)
+                self._mark_file_failed(uploaded_file.id, error_code, error.diagnostic)
             except ValueError as error:
                 failures += 1
                 error_code = 'SPREADSHEET_DIMENSION_LIMIT' if str(error) == 'SPREADSHEET_DIMENSION_LIMIT' else 'PROCESSING_FILE_FAILED'
                 failure_codes.append(error_code)
-                self._mark_file_failed(uploaded_file.id, error_code)
+                self._mark_file_failed(uploaded_file.id, error_code,
+                                        AIDiagnostic(category="schema", validation_type="invalid_value"))
             except Exception:
                 failures += 1
                 failure_codes.append("PROCESSING_FILE_FAILED")
-                self._mark_file_failed(uploaded_file.id, "PROCESSING_FILE_FAILED")
+                self._mark_file_failed(uploaded_file.id, "PROCESSING_FILE_FAILED",
+                                        AIDiagnostic(category="provider"))
 
         checkpoint()
         with self.database.session() as session:
@@ -314,7 +320,7 @@ class ProcessingPipeline:
             uploaded_file.detected_kind = parsed.kind
             uploaded_file.page_count = (
                 max(
-                    [page.page for page in parsed.vision_pages]
+                    [page.page for page in parsed.vision_pages if isinstance(page.page, int) and page.page > 0]
                     + [int(block.locator.get("page", 0)) for block in parsed.blocks]
                     + [0]
                 )
@@ -414,8 +420,13 @@ class ProcessingPipeline:
             checkpoint()
             context = inputs[index]
             if item.ocr_blocks:
+                image_hints: dict[str, Any] = {}
+                for block in context.blocks:
+                    if block.block_type == "image_context":
+                        image_hints.update(block.locator)
+                page_hint = {"page": context.page} if isinstance(context.page, int) and context.page > 0 else {}
                 ocr_blocks = tuple(
-                    ParsedBlock(b.text, b.block_type, {**b.locator, "page": context.page})
+                    ParsedBlock(b.text, b.block_type, {**image_hints, **b.locator, **page_hint})
                     for b in item.ocr_blocks
                 )
                 image_context = tuple(
@@ -527,18 +538,47 @@ class ProcessingPipeline:
         def payload(blocks):
             return "\n".join(f"[source {json.dumps(b.locator, ensure_ascii=False)}]\n{b.text}" for b in blocks).encode()
 
+        def atomic_units(blocks: list[ParsedBlock]) -> list[tuple[ParsedBlock, ...]]:
+            """Keep table/spreadsheet rows together before applying the budget.
+
+            Parser blocks are often individual cells.  Splitting at that level
+            can separate an employee identifier from the date or value that
+            proves it belongs to the same employee.  A row key is deliberately
+            scoped by sheet and table so equal row numbers in different source
+            regions cannot be merged.
+            """
+            units: list[list[ParsedBlock]] = []
+            row_units: dict[tuple[object, object, object], int] = {}
+            for block in blocks:
+                locator = block.locator
+                row = locator.get("row")
+                is_row_block = block.block_type != "header" and isinstance(row, int) and (
+                    "sheet" in locator or "table" in locator
+                )
+                if not is_row_block:
+                    units.append([block])
+                    continue
+                key = (locator.get("sheet"), locator.get("table"), row)
+                unit_index = row_units.get(key)
+                if unit_index is None:
+                    row_units[key] = len(units)
+                    units.append([block])
+                else:
+                    units[unit_index].append(block)
+            return [tuple(unit) for unit in units]
+
         def chunk(blocks: list[ParsedBlock]) -> list[tuple[ParsedBlock, ...]]:
             chunks: list[tuple[ParsedBlock, ...]] = []
             current: list[ParsedBlock] = []
-            for block in blocks:
-                single = payload([block])
+            for unit in atomic_units(blocks):
+                single = payload(list(unit))
                 if len(single.decode("utf-8", errors="replace")) > MAX_EXTRACTION_CHUNK_CHARACTERS:
                     raise AIProviderError("AI_TEXT_LIMIT_EXCEEDED")
-                candidate = payload([*current, block])
+                candidate = payload([*current, *unit])
                 if current and len(candidate.decode("utf-8", errors="replace")) > MAX_EXTRACTION_CHUNK_CHARACTERS:
                     chunks.append(tuple(current))
                     current = []
-                current.append(block)
+                current.extend(unit)
             if current:
                 chunks.append(tuple(current))
             return chunks
@@ -883,7 +923,8 @@ class ProcessingPipeline:
             value_text = json.dumps(fact.value, ensure_ascii=False, sort_keys=True)
             dedupe_key = hashlib.sha256(
                 f"{analysis_id}:{uploaded_file.id}:{employee.id if employee else ''}:"
-                f"{source_scope_key}:{fact.employee_id or ''}:{fact.fact_type}:{value_text}".encode()
+                f"{source_scope_key}:{EXTRACTION_VERSION}:{fact.employee_id or ''}:"
+                f"{fact.fact_type}:{value_text}".encode()
             ).hexdigest()
             existing_fact = session.scalar(
                 select(EmploymentFact).where(
@@ -894,7 +935,8 @@ class ProcessingPipeline:
             if existing_fact is None and decided_fact_ids:
                 previous_keys = {hashlib.sha256(
                     f"{analysis_id}:{uploaded_file.id}:{previous_employee_id}:"
-                    f"{source_scope_key}:{fact.employee_id or ''}:{fact.fact_type}:{value_text}".encode()
+                    f"{source_scope_key}:{EXTRACTION_VERSION}:{fact.employee_id or ''}:"
+                    f"{fact.fact_type}:{value_text}".encode()
                 ).hexdigest() for previous_employee_id in previous_employee_ids}
                 existing_fact = session.scalar(select(EmploymentFact).where(
                     EmploymentFact.analysis_id == analysis_id,
@@ -930,6 +972,11 @@ class ProcessingPipeline:
             if grounding is not None:
                 location[PROOF_KEY] = grounding[fact_index]
             excerpt = mask_sensitive(fact.source.excerpt)
+            # The provider cannot choose this identity.  It is derived only
+            # after local grounding has supplied the real parser position.
+            location[CITATION_KEY] = deterministic_citation_id(
+                uploaded_file.sha256, location, excerpt
+            )
             locator_type = self._locator_type(location)
             location_key = json.dumps(location, sort_keys=True, ensure_ascii=False)
             existing_sources = session.scalars(select(SourceLocatorModel).where(
@@ -1146,7 +1193,8 @@ class ProcessingPipeline:
             for duplicate in alternatives[1:]:
                 session.delete(duplicate)
 
-    def _mark_file_failed(self, file_id: str, error_code: str) -> None:
+    def _mark_file_failed(self, file_id: str, error_code: str,
+                          diagnostic: AIDiagnostic | None = None) -> None:
         with self.database.session() as session:
             uploaded_file = session.get(UploadedFile, file_id)
             if uploaded_file:
@@ -1169,6 +1217,16 @@ class ProcessingPipeline:
                 )
                 for usage in usages:
                     usage.status = "failed"
+                session.add(AuditEvent(
+                    analysis_id=uploaded_file.analysis_id,
+                    event_type="processing_failed",
+                    actor="system",
+                    metadata_json={
+                        "file_id": file_id,
+                        "error_code": error_code,
+                        "diagnostic": diagnostic.as_dict() if diagnostic else {},
+                    },
+                ))
                 session.commit()
             analysis_id = uploaded_file.analysis_id if uploaded_file else None
         if analysis_id:
@@ -1220,6 +1278,16 @@ class ProcessingPipeline:
                 .order_by(UploadedFile.created_at)
             )
         )
+        diagnostics: dict[str, tuple[str | None, dict[str, Any]]] = {}
+        for event in session.scalars(select(AuditEvent).where(
+            AuditEvent.analysis_id == analysis.id,
+            AuditEvent.event_type == "processing_failed",
+        ).order_by(AuditEvent.created_at, AuditEvent.id)):
+            metadata = event.metadata_json if isinstance(event.metadata_json, dict) else {}
+            file_id = metadata.get("file_id")
+            diagnostic = metadata.get("diagnostic")
+            if isinstance(file_id, str) and isinstance(diagnostic, dict):
+                diagnostics[file_id] = (metadata.get("error_code"), diagnostic)
         return {
             "analysis_id": analysis.id,
             "status": analysis.status,
@@ -1232,6 +1300,8 @@ class ProcessingPipeline:
                     "status": item.status,
                     "progress": item.progress,
                     "error_code": item.error_code,
+                    "error_diagnostic": (diagnostics[item.id][1]
+                        if item.error_code and item.id in diagnostics and diagnostics[item.id][0] == item.error_code else None),
                 }
                 for item in files
             ],

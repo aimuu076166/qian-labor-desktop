@@ -6,7 +6,7 @@ from sqlalchemy import select
 from qian_labor.ai.schemas import EmploymentFact, ExtractionResult, SourceLocator
 from qian_labor.desktop.app import create_desktop_app
 from qian_labor.jobs.processing import ProcessingPipeline
-from qian_labor.models.core import SourceLocator as StoredSource
+from qian_labor.models.core import SourceLocator as StoredSource, UploadedFile
 from qian_labor.parsers.protocols import ParsedBlock, ParsedDocument
 from qian_labor.parsers.registry import ParserRegistry
 from qian_labor.storage.local import LocalStorage
@@ -94,6 +94,12 @@ def test_pipeline_locates_actual_quote_without_trusting_provider_filename(tmp_pa
         with app.state.database.session() as session:
             stored = session.scalar(select(StoredSource).where(StoredSource.analysis_id == analysis_id))
             assert stored is not None
+            from qian_labor.services.source_provenance import deterministic_citation_id
             assert stored.location == {"sheet": "CSV", "row": 2, "_grounding": {
-                "version": "parser-grounding-v1", "status": "locally_located", "requires_review": False}}
+                "version": "parser-grounding-v2", "status": "locally_located", "requires_review": False},
+                "_citation_id": deterministic_citation_id(
+                    session.scalar(select(UploadedFile.sha256).where(UploadedFile.analysis_id == analysis_id)),
+                    {"sheet": "CSV", "row": 2, "_grounding": {
+                        "version": "parser-grounding-v2", "status": "locally_located", "requires_review": False}},
+                    "QA-907 | false")}
             assert stored.excerpt == "QA-907 | false"

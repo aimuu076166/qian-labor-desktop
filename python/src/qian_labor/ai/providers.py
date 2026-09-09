@@ -4,6 +4,7 @@ import json
 import mimetypes
 import re
 import time
+from dataclasses import asdict, dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -29,6 +30,75 @@ from qian_labor.security.local_redaction import (
 
 class AIProviderError(RuntimeError):
     """Safe provider error that never includes source text or credentials."""
+
+    def __init__(self, code: str, diagnostic: "AIDiagnostic | None" = None) -> None:
+        # Keep the stable public error code as the exception string. The
+        # bounded diagnostic is separate so callers cannot accidentally expose
+        # provider response text or validation context.
+        super().__init__(code)
+        self.code = code
+        self.diagnostic = diagnostic or AIDiagnostic(category="provider")
+
+
+DiagnosticCategory = Literal[
+    "configuration",
+    "privacy",
+    "budget",
+    "limit",
+    "http",
+    "transport",
+    "timeout",
+    "response",
+    "json",
+    "schema",
+    "semantic",
+    "incomplete",
+    "provider",
+]
+
+
+@dataclass(frozen=True)
+class AIDiagnostic:
+    """Safe, bounded provider diagnostics; never contains request/response text."""
+
+    category: DiagnosticCategory
+    status_code: int | None = None
+    finish_reason: Literal["stop", "length", "content_filter", "tool_calls"] | None = None
+    elapsed_ms: int | None = None
+    attempt: int | None = None
+    input_length: int | None = None
+    output_length: int | None = None
+    path: Literal[
+        "response",
+        "choices",
+        "choices[0]",
+        "choices[0].message",
+        "choices[0].message.content",
+        "response_format",
+        "usage",
+        "facts",
+        "facts[].fact_type",
+        "facts[].value_type",
+        "facts[].value_*",
+        "facts[].source",
+        "contract_advisory",
+    ] | None = None
+    validation_type: Literal[
+        "empty",
+        "not_object",
+        "not_list",
+        "not_string",
+        "invalid_json",
+        "missing_field",
+        "unknown_field",
+        "invalid_type",
+        "invalid_value",
+        "conflict",
+        "unsupported",
+    ] | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {key: value for key, value in asdict(self).items() if value is not None}
 
 
 class AIProvider(Protocol):

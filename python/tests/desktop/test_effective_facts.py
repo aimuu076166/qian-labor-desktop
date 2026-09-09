@@ -7,11 +7,12 @@ from sqlalchemy import select
 
 from test_company_workspaces import api, company, record
 from test_current_company import current, material, extract_materials, select_record
-from qian_labor.models.core import EmploymentFact, SourceLocator
+from qian_labor.models.core import EmploymentFact, SourceLocator, UploadedFile
 
 
 def add_fact(db, aid, name, value, *, file_id=None, unlocated=False):
     import hashlib
+    from qian_labor.services.source_provenance import deterministic_citation_id
     with db.session() as s:
         original = s.scalar(select(EmploymentFact).where(EmploymentFact.analysis_id == aid))
         fact = EmploymentFact(analysis_id=aid, employee_id=original.employee_id, file_id=file_id or original.file_id,
@@ -20,9 +21,11 @@ def add_fact(db, aid, name, value, *, file_id=None, unlocated=False):
         s.add(fact)
         s.flush()
         excerpt = "" if unlocated else "合成原材料"
+        location = {"_grounding": {"version": "parser-grounding-v2", "status": "unlocated_needs_review" if unlocated else "locally_located"}}
+        file = s.get(UploadedFile, fact.file_id)
+        location["_citation_id"] = deterministic_citation_id(file.sha256, location, excerpt)
         source = SourceLocator(analysis_id=aid, fact_id=fact.id, file_id=fact.file_id, locator_type="document",
-            location={"_grounding": {"version": "parser-grounding-v1", "status": "unlocated_needs_review" if unlocated else "locally_located"}},
-            excerpt=excerpt, content_hash=hashlib.sha256(excerpt.encode()).hexdigest())
+            location=location, excerpt=excerpt, content_hash=hashlib.sha256(excerpt.encode()).hexdigest())
         s.add(source)
         s.commit()
         return fact.id

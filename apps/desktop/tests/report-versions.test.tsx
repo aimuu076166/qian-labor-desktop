@@ -113,6 +113,15 @@ describe('immutable reports through actual App', () => {
     expect(screen.getByText('冻结合成企业')).toBeInTheDocument();
     expect(screen.getByText(/已保存版本 1/)).toBeInTheDocument(); expect(posts(f)).toHaveLength(2);
   });
+
+  it('labels a selected saved version as frozen instead of leaving the live-draft warning', async () => {
+    const f = fixture(); renderCompany(f.server); await reports();
+    fireEvent.click(screen.getByRole('button', { name: '生成并保存报告版本' }));
+    await screen.findByText(/已保存版本 1/);
+    expect(screen.getByText('本页为已保存的冻结版本，后续资料或处理修改不会改写本页。')).toBeInTheDocument();
+    expect(screen.queryByText(/尚非锁定版本/)).not.toBeInTheDocument();
+  });
+
   it('creates only on explicit action without a configured provider, prints frozen metadata and restores selected version after Settings', async () => {
     const f = fixture(); renderCompany(f.server, { configurationLoader: async () => ({ ...syntheticConfiguration, configured: false, validated: false }) });
     await reports(); expect(posts(f)).toHaveLength(0);

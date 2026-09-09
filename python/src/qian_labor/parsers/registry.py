@@ -234,7 +234,7 @@ class ParserRegistry:
                 image_number = len(vision_pages) + 1
                 vision_pages.append(
                     VisionPage(
-                        page=1,
+                        page=None,
                         media_type=media_type,
                         image_bytes=image_bytes,
                         width=width,

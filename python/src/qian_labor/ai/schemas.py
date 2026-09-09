@@ -33,6 +33,7 @@ class SourceLocator(BaseModel):
     sheet: str | None = None
     paragraph: int | None = None
     table: int | None = None
+    image: int | None = None
     cell: str | None = None
     block: int | None = None
     excerpt: str = ""
@@ -152,6 +153,7 @@ class ProviderSource(BaseModel):
     sheet: str | None
     paragraph: int | None
     table: int | None = None
+    image: int | None = None
     excerpt: str
     bbox: list[FiniteFloat] | None
 
