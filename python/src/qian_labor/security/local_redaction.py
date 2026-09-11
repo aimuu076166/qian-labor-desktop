@@ -32,8 +32,22 @@ class PrivacyBoundaryError(RuntimeError):
     """A safe local privacy error with no source data in its message."""
 
 
+class ParserTextContent(bytes):
+    """Raw parser text with exact spans of locally generated citation IDs only."""
+
+    def __new__(cls, value: bytes, citation_spans: tuple[tuple[int, int], ...]):
+        instance = super().__new__(cls, value)
+        instance.citation_spans = citation_spans
+        return instance
+
+
 class PreparedProviderContent(bytes):
-    """Internal marker for bytes that already crossed the local privacy boundary."""
+    """Bytes that crossed the local privacy boundary, with optional safe context."""
+
+    def __new__(cls, value: bytes, source_context: dict[str, object] | None = None):
+        instance = super().__new__(cls, value)
+        instance.source_context = source_context
+        return instance
 
 
 @dataclass(frozen=True)
@@ -248,13 +262,21 @@ class PrivacyBoundary:
                 redacted.ocr_blocks,
             )
         text = content.decode("utf-8", errors="replace")
-        evidence = self._text_evidence(text) if self.pepper else ()
+        spans = content.citation_spans if isinstance(content, ParserTextContent) else ()
+        pieces, evidence_pieces, start = [], [], 0
+        for left, right in spans:
+            pieces.extend((mask_sensitive(text[start:left]), text[left:right]))
+            evidence_pieces.extend((text[start:left], ' ' * (right-left)))
+            start = right
+        pieces.append(mask_sensitive(text[start:]))
+        evidence_pieces.append(text[start:])
+        evidence = self._text_evidence(''.join(evidence_pieces)) if self.pepper else ()
         hashes = LocalImageRedactor._unique_hashes(evidence)
         if not external:
             return PreparedProviderInput(filename, content, hashes, evidence)
         return PreparedProviderInput(
             mask_sensitive(filename),
-            PreparedProviderContent(mask_sensitive(text).encode("utf-8")),
+            PreparedProviderContent(''.join(pieces).encode("utf-8")),
             hashes,
             evidence,
         )

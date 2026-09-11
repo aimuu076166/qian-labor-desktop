@@ -27,7 +27,7 @@ from qian_labor.services.assessment_state import assessment_metadata, check_date
 
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
 SEVERITY_LABELS = {"high": "高风险", "medium": "中风险", "low": "低风险", "info": "提示"}
-REAL_RISK_STATUSES = {"suspected_risk", "confirmed_anomaly", "requires_human_review"}
+REAL_RISK_STATUSES = {"suspected_risk", "confirmed_anomaly"}
 REVIEW_STATUS_LABELS = {
     "open": "待处理",
     "reviewed": "已确认",
@@ -107,7 +107,7 @@ class DashboardService:
                 is not None
             )
             risk_findings = [
-                item for item in findings if item.assessment_status != "insufficient_data"
+                item for item in findings if item.assessment_status in REAL_RISK_STATUSES
             ]
             categories = Counter(item.category for item in findings)
             departments = Counter(

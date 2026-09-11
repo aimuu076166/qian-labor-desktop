@@ -70,9 +70,9 @@ function valueText(value: FactValue): string {
 }
 function safeId(value: string) { return value.length <= 12 ? value : `${value.slice(0, 6)}…${value.slice(-4)}`; }
 function locationText(source: Source) {
-  const labels: Record<string, string> = { page: '页', paragraph: '段', row: '行', column: '列', table: '表', sheet: '工作表', cell: '单元格' };
+  const labels: Record<string, string> = { page: '页', paragraph: '段', image: '张图片', row: '行', column: '列', table: '表', sheet: '工作表', cell: '单元格' };
   const parts = Object.entries(source.location).filter(([key]) => key !== '_grounding')
-    .map(([key, value]) => typeof value === 'number' && ['page', 'paragraph', 'row', 'table'].includes(key)
+    .map(([key, value]) => typeof value === 'number' && ['page', 'paragraph', 'image', 'row', 'table'].includes(key)
       ? `第 ${String(value)} ${labels[key]}` : `${labels[key] ?? key} ${String(value)}`);
   return parts.join(' · ') || '材料内位置待核对';
 }

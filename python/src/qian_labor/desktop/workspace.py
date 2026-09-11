@@ -1,5 +1,7 @@
 """Read-only workspace navigation, independent of processing and provider state."""
 
+from collections import Counter
+
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import func, select
 
@@ -9,6 +11,7 @@ from qian_labor.models.core import AnalysisBatch, EmploymentFact, UploadedFile, 
 from qian_labor.jobs.processing import ProcessingPipeline
 from qian_labor.ai.grounding import EXTRACTION_VERSION
 from qian_labor.services.analyses import AnalysisService
+from qian_labor.services.effective_facts import effective_projection
 
 
 def workspace_router(database: Database) -> APIRouter:
@@ -38,6 +41,9 @@ def workspace_router(database: Database) -> APIRouter:
             fact_counts = dict(session.execute(select(EmploymentFact.file_id, func.count()).where(
                 EmploymentFact.analysis_id == analysis_id,
             ).group_by(EmploymentFact.file_id)).all())
+            display_fact_counts = Counter(
+                row.file_id for row in effective_projection(session, analysis_id) if row.file_id
+            )
             extraction_jobs = list(session.scalars(select(ProcessingJob).where(
                 ProcessingJob.analysis_id == analysis_id, ProcessingJob.job_type == "extract")))
             succeeded = {job.unique_key for job in extraction_jobs if job.status == "succeeded"}
@@ -68,11 +74,13 @@ def workspace_router(database: Database) -> APIRouter:
                 "error_diagnostic": diagnostic_for(item, item.error_code or (
                     "AI_NO_SUPPORTED_FACTS" if item.status == "processed" and not fact_counts.get(item.id) and item.id not in advisory_runs else None)),
                 "advisory_status": advisory_runs[item.id].execution_status if item.id in advisory_runs else "not_executed",
-                "fact_count": fact_counts.get(item.id, 0), "size_bytes": item.size_bytes,
+                "fact_count": display_fact_counts.get(item.id, 0), "size_bytes": item.size_bytes,
                 "warnings": [w for w in warnings.get(item.id, []) if w in {"embedded_images_need_vision", "empty_csv"}],
                 "extraction_version": EXTRACTION_VERSION if ProcessingPipeline._job_key(analysis_id, item.id, "extract", item.sha256) in succeeded else None,
                 "needs_reextraction": (item.id in previously_extracted or item.status in {"processed", "partial"}) and
-                    ProcessingPipeline._job_key(analysis_id, item.id, "extract", item.sha256) not in succeeded,
+                    (ProcessingPipeline._job_key(analysis_id, item.id, "extract", item.sha256) not in succeeded
+                     or item.extension.lower() in {".xlsx", ".xls"} and
+                        ProcessingPipeline.has_unlocated_sources(session, analysis_id, item.id)),
             } for item in files]}
 
     return router

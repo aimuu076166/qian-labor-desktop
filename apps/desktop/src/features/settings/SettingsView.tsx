@@ -94,10 +94,10 @@ export function SettingsView({
           name="zhipu-api-key"
           type="password"
           autoComplete="off"
-          required
+          required={!status.configured}
           minLength={8}
           maxLength={4096}
-          placeholder={status.configured ? '重新输入以更新 Key' : '请输入你自己的智谱 API Key'}
+          placeholder={status.configured ? '留空沿用已保存的 Key，输入新 Key 可替换' : '请输入你自己的智谱 API Key'}
         />
 
         <label htmlFor="zhipu-model">分析模型</label>

@@ -405,6 +405,9 @@ class RiskEvaluationService:
             )
             source_ids: set[str] = set()
             for fact in ordered:
+                if fact.analysis_id in current_ids:
+                    source_ids.update(source.id for source in fact.state.sources)
+                    continue
                 source_ids.update(session.scalars(
                     select(SourceLocator.id)
                     .join(UploadedFile, UploadedFile.id == SourceLocator.file_id)

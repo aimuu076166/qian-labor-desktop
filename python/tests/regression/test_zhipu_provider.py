@@ -189,6 +189,34 @@ def test_zhipu_image_request_uses_image_url_with_locally_redacted_bytes() -> Non
     assert result.document_type == "contract"
 
 
+def test_zhipu_image_request_preserves_parser_context_and_local_ocr_ids() -> None:
+    request = ZhipuChatCompletionsProvider._request_payload(
+        "嵌图合同-image-1.png",
+        b"synthetic-redacted-image",
+        MODEL,
+        True,
+        source_context={
+            "parser_context": [{
+                "locator": {"paragraph": 2, "image": 1},
+                "citation_id": "cite-synthetic-image-context",
+            }],
+            "ocr_blocks": [{
+                "locator": {"paragraph": 2, "image": 1, "block": 1},
+                "citation_id": "cite-synthetic-ocr-context",
+                "text": "SYN-001 signed contract",
+            }],
+        },
+    )
+
+    user_text = request["messages"][1]["content"][0]["text"]
+
+    assert "\"paragraph\":2" in user_text
+    assert "\"image\":1" in user_text
+    assert "cite-synthetic-image-context" in user_text
+    assert "cite-synthetic-ocr-context" in user_text
+    assert "SYN-001 signed contract" in user_text
+
+
 def test_zhipu_provider_rejects_invalid_json_contract() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -201,6 +229,36 @@ def test_zhipu_provider_rejects_invalid_json_contract() -> None:
 
     with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
         _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+
+@pytest.mark.parametrize(
+    ("content", "kind"),
+    [
+        ('{"synthetic-secret-marker": 1 "next": 2}', "missing_comma"),
+        ('{"synthetic-secret-marker" 1}', "missing_colon"),
+        ('{"synthetic-secret-marker": "unfinished}', "unterminated_string"),
+        ('{"synthetic-secret-marker": "bad\\x"}', "invalid_escape"),
+        ('{"synthetic-secret-marker": "bad\nline"}', "control_character"),
+        ('{"synthetic-secret-marker": 1,}', "property_name"),
+        ('{"synthetic-secret-marker": }', "expected_value"),
+        ('{} synthetic-secret-marker', "extra_data"),
+        ('```json\n{"synthetic-secret-marker": 1}\n```', "markdown_fence"),
+    ],
+)
+def test_invalid_json_diagnostic_has_only_safe_kind_and_position(content: str, kind: str) -> None:
+    payload = _success_response().json()
+    payload["choices"][0]["message"]["content"] = content
+    with pytest.raises(json.JSONDecodeError) as expected:
+        json.loads(content)
+    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID") as caught:
+        _provider(lambda _request: httpx.Response(200, json=payload)).extract(
+            "synthetic.txt", b"fictional contract"
+        )
+    diagnostic = caught.value.diagnostic.as_dict()
+    assert diagnostic.get("json_error_kind") == kind
+    assert diagnostic.get("json_error_position") == expected.value.pos
+    assert "synthetic-secret-marker" not in repr(diagnostic)
+    assert diagnostic["validation_type"] == "invalid_json"
 
 
 def test_zhipu_provider_rejects_parseable_json_when_generation_is_truncated() -> None:
@@ -233,6 +291,23 @@ def test_zhipu_diagnostic_marks_truncated_json_as_incomplete_without_response_te
     assert error.diagnostic.finish_reason == "length"
     assert "synthetic-secret-marker" not in repr(error)
     assert "synthetic-person-text" not in repr(error.diagnostic.as_dict())
+
+
+def test_zhipu_provider_rejects_unknown_finish_reason_without_echoing_it() -> None:
+    payload = _success_response().json()
+    assert isinstance(payload, dict)
+    payload["choices"][0]["finish_reason"] = "synthetic-unknown-finish"
+
+    with pytest.raises(AIProviderError) as caught:
+        _provider(lambda _request: httpx.Response(200, json=payload), max_attempts=1).extract(
+            "虚构合同.txt", b"synthetic-person-text"
+        )
+
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.category == "incomplete"
+    assert diagnostic.validation_type == "unsupported"
+    assert diagnostic.path == "choices[0]"
+    assert "synthetic-unknown-finish" not in repr(diagnostic.as_dict())
 
 
 @pytest.mark.parametrize(
@@ -322,7 +397,11 @@ def test_zhipu_request_sets_a_bounded_output_budget_for_contract_and_spreadsheet
     request = ZhipuChatCompletionsProvider._request_payload(
         "synthetic.xlsx-part-1.txt", b"SYN-001 | 2026-01-01", MODEL, False
     )
-    assert request["max_tokens"] >= 4096
+    # A live multi-employee response using the default effort hit the old
+    # 8192-token cap. Keep thinking enabled, with bounded headroom and low effort.
+    assert request["max_tokens"] == 32768
+    assert request["reasoning_effort"] == "low"
+    assert request["thinking"] == {"type": "enabled"}
 
 
 def test_zhipu_provider_normalizes_the_observed_glm_value_json_key_truncation() -> None:
@@ -337,6 +416,20 @@ def test_zhipu_provider_normalizes_the_observed_glm_value_json_key_truncation() 
     result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
 
     assert result.facts[0].value is True
+
+
+def test_zhipu_provider_accepts_parser_cell_and_block_locations() -> None:
+    payload = _provider_payload()
+    source = payload["facts"][0]["source"]
+    assert isinstance(source, dict)
+    source.update(cell="B2", block=1)
+
+    result = _provider(lambda _request: _success_response(payload)).extract(
+        "虚构合同.txt", b"fictional contract"
+    )
+
+    assert result.facts[0].source.cell == "B2"
+    assert result.facts[0].source.block == 1
 
 
 def test_zhipu_provider_recovers_observed_generic_value_with_blank_value_type() -> None:
@@ -373,6 +466,38 @@ def test_zhipu_provider_rejects_a_fact_whose_value_type_cannot_feed_its_rule() -
 
     with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
         _provider(handler).extract("虚构合同.txt", b"fictional contract")
+
+
+def test_value_type_diagnostic_identifies_first_bad_fact_without_content() -> None:
+    from copy import deepcopy
+    payload = _provider_payload()
+    bad = deepcopy(payload["facts"][0])
+    bad.update(fact_type="employment.probation.assessment_exists", value_type="text",
+               value_text="synthetic-private-value", value_boolean=None)
+    bad["source"]["excerpt"] = "synthetic-private-excerpt"
+    payload["facts"].extend([bad, deepcopy(bad)])
+    with pytest.raises(AIProviderError) as caught:
+        _provider(lambda _: _success_response(payload)).extract("synthetic.txt", b"synthetic")
+    diagnostic = caught.value.diagnostic.as_dict()
+    assert diagnostic["fact_index"] == 1  # zero-based; the first fact is valid
+    assert diagnostic["fact_type"] == "employment.probation.assessment_exists"
+    assert diagnostic["actual_value_type"] == "text"
+    assert list(diagnostic["expected_value_types"]) == ["boolean", "null"]
+    assert diagnostic["path"] == "facts[].value_type"
+    assert "synthetic-private" not in repr(diagnostic)
+    assert "F-903" not in repr(diagnostic)
+    assert str(caught.value) == "AI_SCHEMA_INVALID"
+
+
+def test_unknown_fact_type_is_not_copied_to_diagnostic() -> None:
+    payload = _provider_payload()
+    payload["facts"][0]["fact_type"] = "synthetic-private-unknown-field"
+    with pytest.raises(AIProviderError) as caught:
+        _provider(lambda _: _success_response(payload)).extract("synthetic.txt", b"synthetic")
+    diagnostic = caught.value.diagnostic.as_dict()
+    assert diagnostic["path"] == "facts[].fact_type"
+    assert "fact_type" not in diagnostic
+    assert "synthetic-private" not in repr(diagnostic)
 
 
 def test_zhipu_provider_accepts_consistent_redundant_text_for_a_typed_value() -> None:
@@ -556,6 +681,7 @@ def test_provider_factory_defaults_zhipu_to_glm_5_3_flash_and_official_base() ->
     assert provider.text_model == "glm-5.3-flash"
     assert provider.vision_model == "glm-5.3-flash"
     assert provider.timeout == 180
+    assert provider.max_attempts == 1
 
 
 def test_provider_factory_keeps_openai_official_default_when_base_url_is_blank() -> None:

@@ -412,6 +412,13 @@ class DesktopTasks:
                 if run.state in ACTIVE:
                     terminal = "cancelled" if run.state == "cancel_requested" else "interrupted" if control.interrupted else (
                         result["status"] if result["status"] in {"completed", "partial", "failed"} else "completed")
+                    # Human evidence review is a business state, not unfinished
+                    # execution. Keep the partial assessment without locking imports.
+                    files = result.get("files", [])
+                    if terminal == "partial" and files and all(
+                        item["status"] == "processed" and not item.get("error_code") for item in files
+                    ):
+                        terminal = "completed"
                     self.transition(run, terminal)
                     if terminal in {"cancelled", "interrupted", "failed"}:
                         self.interrupted_files(session, analysis_id)

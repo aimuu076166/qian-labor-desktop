@@ -81,13 +81,14 @@ def test_citation_id_is_deterministic_and_binds_file_position_and_block():
 def test_current_grounding_requires_a_valid_citation_id():
     import hashlib
     from types import SimpleNamespace
+    from qian_labor.ai.grounding import EXTRACTION_VERSION
     from qian_labor.services.effective_facts import valid_source_metadata
     from qian_labor.services.source_provenance import deterministic_citation_id
 
     file = SimpleNamespace(sha256="a" * 64)
     excerpt = "SYN-001 合同图像"
     location = {"paragraph": 2, "_grounding": {
-        "version": "parser-grounding-v2", "status": "locally_located", "requires_review": False,
+        "version": EXTRACTION_VERSION, "status": "locally_located", "requires_review": False,
     }}
     location["_citation_id"] = deterministic_citation_id(file.sha256, location, excerpt)
     source = SimpleNamespace(location=location, excerpt=excerpt,

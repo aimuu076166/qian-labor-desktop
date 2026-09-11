@@ -369,13 +369,14 @@ def location_report_fixture():
     from io import BytesIO
     from types import SimpleNamespace
     from openpyxl import Workbook
+    from qian_labor.ai.grounding import EXTRACTION_VERSION
     from qian_labor.database import create_database
     from qian_labor.models.core import CompanyWorkspace, CompanyAnalysisBinding, Employee, UploadedFile, EmploymentFact
     from qian_labor.services.report_versions import ReportVersionService, GenerateReportRequest
     from qian_labor.services.source_provenance import deterministic_citation_id
     db = create_database('sqlite+pysqlite:///:memory:', create_schema=True)
     location = {'sheet': '合成联系人13800138000', 'column': '合成列13900139000', 'row': 2,
-        '_grounding': {'version': 'parser-grounding-v2', 'status': 'locally_located', 'requires_review': True}}
+        '_grounding': {'version': EXTRACTION_VERSION, 'status': 'locally_located', 'requires_review': True}}
     workbook = Workbook()
     workbook.active.title = location['sheet']
     workbook.active.append([location['column']])

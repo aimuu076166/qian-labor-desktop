@@ -22,6 +22,7 @@ from qian_labor.ai.schemas import (
     UsageRecord,
 )
 from qian_labor.security.local_redaction import (
+    PreparedProviderContent,
     PrivacyBoundary,
     PrivacyBoundaryError,
     valid_external_pepper,
@@ -68,6 +69,18 @@ class AIDiagnostic:
     attempt: int | None = None
     input_length: int | None = None
     output_length: int | None = None
+    json_error_position: int | None = None
+    # Set only after canonical fact/type validation; never copy arbitrary model
+    # strings, values or excerpts here. fact_index is zero-based.
+    fact_index: int | None = None
+    fact_type: str | None = None
+    actual_value_type: str | None = None
+    expected_value_types: tuple[str, ...] | None = None
+    json_error_kind: Literal[
+        "missing_comma", "missing_colon", "unterminated_string", "invalid_escape",
+        "control_character", "property_name", "expected_value", "extra_data",
+        "markdown_fence", "other",
+    ] | None = None
     path: Literal[
         "response",
         "choices",
@@ -321,20 +334,29 @@ class OpenAIResponsesProvider:
             raise AIProviderError("AI_BUDGET_EXCEEDED")
 
         idempotency_key = str(uuid4())
-        redaction_failed = False
-        try:
-            prepared = self.privacy_boundary.prepare(
-                filename,
-                content,
-                is_image=is_image,
-                external=True,
-            )
-        except PrivacyBoundaryError:
-            redaction_failed = True
-            prepared = None
-        if redaction_failed or prepared is None:
-            raise AIProviderError("AI_LOCAL_REDACTION_FAILED") from None
-        payload = self._request_payload(prepared.filename, prepared.content, model, is_image)
+        source_context = getattr(content, "source_context", None)
+        if isinstance(content, PreparedProviderContent):
+            prepared_filename = filename
+            prepared_content = bytes(content)
+        else:
+            try:
+                prepared = self.privacy_boundary.prepare(
+                    filename,
+                    content,
+                    is_image=is_image,
+                    external=True,
+                )
+            except PrivacyBoundaryError:
+                raise AIProviderError("AI_LOCAL_REDACTION_FAILED") from None
+            prepared_filename = prepared.filename
+            prepared_content = prepared.content
+        payload = self._request_payload(
+            prepared_filename,
+            prepared_content,
+            model,
+            is_image,
+            source_context=source_context,
+        )
         started = time.monotonic()
         response: httpx.Response | None = None
         attempts = 0
@@ -454,7 +476,12 @@ class OpenAIResponsesProvider:
 
     @staticmethod
     def _request_payload(
-        filename: str, content: bytes, model: str, is_image: bool
+        filename: str,
+        content: bytes,
+        model: str,
+        is_image: bool,
+        *,
+        source_context: dict[str, object] | None = None,
     ) -> dict[str, object]:
         prompt = (
             "Extract structured employment facts from the provided employment document. "
@@ -462,6 +489,13 @@ class OpenAIResponsesProvider:
             "Return null when a field cannot be reliably determined. "
             "Preserve source locations. "
             f"Filename: {filename}"
+            + (
+                "\nParser-owned context and local OCR blocks follow. "
+                "Copy citation_id values exactly when citing them; never invent one.\n"
+                + json.dumps(source_context, ensure_ascii=False, separators=(",", ":"))
+                if source_context
+                else ""
+            )
         )
         input_content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
         if is_image:

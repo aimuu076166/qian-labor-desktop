@@ -19,7 +19,7 @@ from qian_labor.models.core import (
 )
 from qian_labor.security.masking import mask_sensitive
 from qian_labor.security.filenames import display_filename
-from qian_labor.services.source_provenance import CITATION_KEY, deterministic_citation_id, grounding_requires_review, projected_source
+from qian_labor.services.source_provenance import CITATION_KEY, deterministic_citation_id, grounding_requires_review, projected_source, current_source_attempt
 
 PENDING = {"conflicted", "pending_review", "needs_human_confirmation"}
 CONTRACT_TYPES = {"employment.contract." + suffix for suffix in
@@ -177,6 +177,9 @@ def owned_state(s, fact):
                  (not file.parsed_document or file.parsed_document.content_hash == file.sha256) and
                  all(x.analysis_id == fact.analysis_id and x.file_id == fact.file_id and
                      valid_source_metadata(x, allow_legacy=bool(owner and owner.role == "historical")) for x in sources))
+    old_sources = sources
+    if not owner or owner.role != 'historical':
+        sources = current_source_attempt(s, sources)
     owned = bool(owner and employee and employee.analysis_id == fact.analysis_id and binding and
                  binding.analysis_id == fact.analysis_id and record and record.company_id == owner.company_id)
     decisions = []
@@ -190,6 +193,7 @@ def owned_state(s, fact):
     source_sig = digest([file.id if file else None, file.sha256 if file else None,
                          [[x.id, x.analysis_id, x.file_id, x.locator_type, x.location, x.excerpt, x.content_hash] for x in sources]])
     return SimpleNamespace(valid=valid, owned=owned, owner=owner, record=record, file=file, sources=sources,
+                           source_refreshed=sources != old_sources,
                            owner_signature=owner_sig, source_signature=source_sig)
 
 
@@ -209,6 +213,9 @@ def fact_projection(s, fact):
         data.update(normalized_value_json=revision.value, verification_status="human_confirmed" if revision.value is not None else "needs_human_confirmation")
     elif not state.valid or any(grounding_requires_review(source.location) for source in state.sources):
         data["verification_status"] = "needs_human_confirmation"
+    elif state.source_refreshed and fact.verification_status == 'needs_human_confirmation':
+        # A successful retry can replace extraction uncertainty, never a human revision.
+        data["verification_status"] = "unverified"
     return SimpleNamespace(**data)
 
 

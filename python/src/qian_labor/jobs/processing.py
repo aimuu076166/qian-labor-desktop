@@ -1,4 +1,7 @@
 from __future__ import annotations
+from dataclasses import replace
+from collections import Counter
+
 from qian_labor.security.filenames import display_filename
 
 import hashlib
@@ -16,10 +19,16 @@ from qian_labor.ai.providers import (
     AIDiagnostic,
     AIProviderError,
     FakeAIProvider,
-    OpenAIResponsesProvider,
 )
 from qian_labor.ai.schemas import ExtractionResult, SourceLocator
-from qian_labor.ai.grounding import EXTRACTION_VERSION, MAX_TEXT_CHARACTERS, PROOF_KEY, ExtractionInput, ground_result
+from qian_labor.ai.grounding import (
+    EXTRACTION_VERSION,
+    MAX_TEXT_CHARACTERS,
+    PROOF_KEY,
+    ExtractionInput,
+    deterministic_citation_id,
+    ground_result,
+)
 from qian_labor.database import Database, create_database
 from qian_labor.matching.scoring import score_candidate
 from qian_labor.matching.types import CandidateIdentity
@@ -47,15 +56,16 @@ from qian_labor.parsers.protocols import ParsedDocument, ParsedBlock
 from qian_labor.parsers.registry import ParserRegistry
 from qian_labor.security.local_redaction import (
     IdentifierEvidence,
+    ParserTextContent,
+    PreparedProviderContent,
     PreparedProviderInput,
     PrivacyBoundary,
     PrivacyBoundaryError,
-    valid_external_pepper,
 )
 from qian_labor.security.masking import mask_identity, mask_sensitive
 from qian_labor.services.risk_evaluation import RiskEvaluationService
 from qian_labor.services.company_workspaces import require_material_mutation
-from qian_labor.services.source_provenance import CITATION_KEY, deterministic_citation_id
+from qian_labor.services.source_provenance import CITATION_KEY
 from qian_labor.settings import Settings
 from qian_labor.storage.local import LocalStorage
 
@@ -68,23 +78,11 @@ MAX_EXTRACTION_CHUNK_CHARACTERS = 16_000
 
 
 def provider_from_settings(settings: Settings) -> AIProvider:
-    if settings.ai_provider == "fake":
-        return FakeAIProvider()
-    if settings.ai_provider in {"openai", "openai-responses"}:
-        if (
-            not valid_external_pepper(settings.pii_hash_pepper)
-            or settings.pii_hash_pepper == settings.app_secret
-        ):
-            raise AIProviderError("AI_PRIVACY_CONFIG_INVALID")
-        return OpenAIResponsesProvider(
-            settings.ai_api_key,
-            settings.ai_base_url,
-            settings.ai_text_model,
-            settings.ai_vision_model,
-            batch_budget_usd=settings.ai_batch_budget_usd,
-            privacy_boundary=PrivacyBoundary(settings.pii_hash_pepper),
-        )
-    raise RuntimeError("AI_PROVIDER_UNSUPPORTED")
+    # Keep the legacy sidecar entry point on the same factory as the desktop
+    # app; otherwise a configured Zhipu provider is unsupported when this
+    # module is launched directly.
+    from qian_labor.ai.provider_factory import provider_from_settings as build_provider
+    return build_provider(settings)
 
 
 class ProcessingPipeline:
@@ -254,9 +252,52 @@ class ProcessingPipeline:
         advisory_run = session.scalar(select(ContractAdvisoryRun).where(
             ContractAdvisoryRun.analysis_id == analysis_id, ContractAdvisoryRun.file_id == uploaded_file.id,
             ContractAdvisoryRun.input_key == f"{key}:attempt:{job.attempts}"))
+        # A successful provider call is not reusable when its evidence was
+        # deliberately left unlocated by the local grounding pass.  The
+        # material workspace exposes an explicit "开始分析" action for this
+        # case; silently reusing the old rows would make that action a no-op
+        # and prevent a legitimate source-context retry.
+        if uploaded_file.extension.lower() in {".xlsx", ".xls"} and cls.has_unlocated_sources(
+                session, analysis_id, uploaded_file.id):
+            return False
         upgrade_advisory = bool(getattr(provider, "supports_contract_advisory", False)) and (
             advisory_run is None or any(status in {"unreadable", "not_executed"} for status in advisory_run.input_statuses))
         return bool((has_facts or advisory_run) and not upgrade_advisory)
+
+    @staticmethod
+    def has_unlocated_sources(session, analysis_id: str, file_id: str) -> bool:
+        """Check this successful attempt, not immutable historical failures.
+
+        The completion count is committed with the facts. It controls retry
+        only; historical evidence and human-review gates remain unchanged.
+        Pre-count installations fall back to current-version source proofs.
+        """
+        file = session.get(UploadedFile, file_id)
+        if file is None or file.analysis_id != analysis_id:
+            return False
+        key = ProcessingPipeline._job_key(analysis_id, file_id, "extract", file.sha256)
+        job = session.scalar(select(ProcessingJob).where(ProcessingJob.unique_key == key))
+        if job is not None and job.status == "succeeded":
+            event = session.scalar(select(AuditEvent).where(
+                AuditEvent.analysis_id == analysis_id,
+                AuditEvent.event_type == "extraction_grounding_completed",
+                AuditEvent.metadata_json["job_key"].as_string() == key,
+                AuditEvent.metadata_json["attempt"].as_integer() == job.attempts,
+            ).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc()).limit(1))
+            count = event.metadata_json.get("unlocated_count") if event else None
+            if type(count) is int and count >= 0:
+                return count > 0
+        sources = session.scalars(select(SourceLocatorModel).where(
+            SourceLocatorModel.analysis_id == analysis_id,
+            SourceLocatorModel.file_id == file_id,
+        ))
+        return any(
+            isinstance(source.location, dict)
+            and isinstance(source.location.get(PROOF_KEY), dict)
+            and source.location[PROOF_KEY].get("version") == EXTRACTION_VERSION
+            and source.location[PROOF_KEY].get("status") == "unlocated_needs_review"
+            for source in sources
+        )
 
     def _parse(self, analysis_id: str, file_id: str, content: bytes) -> ParsedDocument:
         with self.database.session() as session:
@@ -398,15 +439,26 @@ class ProcessingPipeline:
         if isinstance(budget, (int, float)) and self._estimated_cost_usd >= budget:
             raise AIProviderError("AI_BUDGET_EXCEEDED")
         external = bool(getattr(self.provider, "is_external", self.provider.name != "fake"))
-        prepared_inputs = [
-            self.privacy_boundary.prepare(
-                filename,
-                payload,
-                is_image=Path(filename).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"},
+        prepared_inputs = []
+        for input_item in inputs:
+            is_image = Path(input_item.filename).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+            prepared = self.privacy_boundary.prepare(
+                input_item.filename,
+                input_item.content,
+                is_image=is_image,
                 external=external,
             )
-            for filename, payload in inputs
-        ]
+            if is_image and external:
+                source_context = self._vision_source_context(input_item, prepared)
+                if source_context:
+                    prepared = replace(
+                        prepared,
+                        content=PreparedProviderContent(
+                            prepared.content,
+                            source_context=source_context,
+                        ),
+                    )
+            prepared_inputs.append(prepared)
         results: list[tuple[ExtractionResult, PreparedProviderInput, list[dict]]] = []
         advisory_grounding = []
         for index, item in enumerate(prepared_inputs):
@@ -437,6 +489,7 @@ class ProcessingPipeline:
                     context.content,
                     ocr_blocks + image_context,
                     context.page,
+                    context.source_file_hash,
                 )
             grounding = ground_result(result, context, original_filename)
             from qian_labor.ai.grounding import ground_advisory
@@ -457,8 +510,10 @@ class ProcessingPipeline:
             if uploaded_file is None or job is None:
                 raise KeyError(file_id)
             assignments = []
+            selected_sources = []
             for result, prepared, grounding in results:
-                assignments.append(self._persist_result(session, analysis_id, uploaded_file, result, prepared=prepared, grounding=grounding))
+                assignments.append(self._persist_result(session, analysis_id, uploaded_file, result, prepared=prepared, grounding=grounding,
+                                                       selected_sources=selected_sources))
             from qian_labor.services.contract_advisory import persist_run
             persist_run(session, analysis_id, uploaded_file, f"{key}:attempt:{job_attempt}", results, advisory_grounding, assignments,
                         has_warnings=bool(parsed.warnings))
@@ -473,6 +528,18 @@ class ProcessingPipeline:
             uploaded_file.detected_kind = parsed.kind
             job.status = "succeeded"
             job.completed_at = datetime.now(UTC)
+            if uploaded_file.extension.lower() in {".xlsx", ".xls"}:
+                session.add(AuditEvent(analysis_id=analysis_id,
+                    event_type="extraction_grounding_completed", metadata_json={
+                        "file_id": file_id, "job_key": key, "attempt": job_attempt,
+                        "source_ids": sorted({source.id for source in selected_sources}),
+                        "unlocated_count": sum(proof.get("status") == "unlocated_needs_review"
+                            for _, _, proofs in results for proof in proofs),
+                        "failure_counts": dict(Counter(proof['diagnostic']['reason']
+                            for _, _, proofs in results for proof in proofs if 'diagnostic' in proof)),
+                        "first_failure": next((proof['diagnostic']
+                            for _, _, proofs in results for proof in proofs if 'diagnostic' in proof), None),
+                    }))
             session.commit()
         self._refresh_analysis_progress(analysis_id)
         return False
@@ -522,8 +589,10 @@ class ProcessingPipeline:
     def _extraction_inputs(
         original_filename: str, content: bytes, parsed: ParsedDocument
     ) -> list[ExtractionInput]:
+        source_file_hash = hashlib.sha256(content).hexdigest()
         if parsed.kind == "image":
-            return [ExtractionInput(original_filename, content, page=1)]
+            return [ExtractionInput(original_filename, content, page=1,
+                                    source_file_hash=source_file_hash)]
 
         inputs: list[ExtractionInput] = []
         blocks_by_page: dict[int, list] = {}
@@ -536,7 +605,60 @@ class ProcessingPipeline:
                 document_blocks.append(block)
 
         def payload(blocks):
-            return "\n".join(f"[source {json.dumps(b.locator, ensure_ascii=False)}]\n{b.text}" for b in blocks).encode()
+            row_groups: dict[tuple[object, object, object], list[ParsedBlock]] = {}
+            for block in blocks:
+                locator = block.locator
+                if (
+                    block.block_type != "header"
+                    and block.text.strip()
+                    and isinstance(locator.get("row"), int)
+                    and "column" in locator
+                ):
+                    row_key = (locator.get("sheet"), locator.get("table"), locator["row"])
+                    row_groups.setdefault(row_key, []).append(block)
+            emitted_rows: set[tuple[object, object, object]] = set()
+            lines = []
+            citation_spans, offset = [], 0
+            for block in blocks:
+                locator = dict(block.locator)
+                citation_line = ""
+                row_context_line = ""
+                if block.block_type != "header" and block.text.strip():
+                    row_key = (locator.get("sheet"), locator.get("table"), locator.get("row"))
+                    if row_key in row_groups and row_key not in emitted_rows:
+                        row_blocks = row_groups[row_key]
+                        row_locator = {"row": locator["row"]}
+                        if locator.get("sheet") is not None:
+                            row_locator["sheet"] = locator["sheet"]
+                        if locator.get("table") is not None:
+                            row_locator["table"] = locator["table"]
+                        row_text = " | ".join(row_block.text for row_block in row_blocks)
+                        row_citation_id = deterministic_citation_id(
+                            source_file_hash,
+                            row_locator,
+                            mask_sensitive(row_text),
+                        )
+                        row_context_line = (
+                            f"[row_context {json.dumps({**row_locator, 'citation_id': row_citation_id, 'excerpt': row_text}, ensure_ascii=False)}]\n"
+                        )
+                        emitted_rows.add(row_key)
+                    citation_id = deterministic_citation_id(
+                        source_file_hash,
+                        locator,
+                        mask_sensitive(block.text),
+                    )
+                    citation_line = f"\n[citation_id {citation_id}]"
+                source_line = f"[source {json.dumps(locator, ensure_ascii=False)}]"
+                if row_context_line:
+                    left = offset + row_context_line.index(row_citation_id)
+                    citation_spans.append((left, left + len(row_citation_id)))
+                if citation_line:
+                    left = offset + len(row_context_line) + len(source_line) + len('\n[citation_id ')
+                    citation_spans.append((left, left + len(citation_id)))
+                line = f"{row_context_line}{source_line}{citation_line}\n{block.text}"
+                lines.append(line)
+                offset += len(line) + 1
+            return ParserTextContent("\n".join(lines).encode(), tuple(citation_spans))
 
         def atomic_units(blocks: list[ParsedBlock]) -> list[tuple[ParsedBlock, ...]]:
             """Keep table/spreadsheet rows together before applying the budget.
@@ -592,6 +714,7 @@ class ProcessingPipeline:
                     payload(list(blocks)),
                     blocks,
                     page,
+                    source_file_hash,
                 ))
         if document_blocks:
             document_chunks = chunk(document_blocks)
@@ -606,7 +729,8 @@ class ProcessingPipeline:
                 else:
                     suffix = f"-part-{part}" if len(document_chunks) > 1 else ""
                     filename = f"{base}{suffix}.txt"
-                inputs.append(ExtractionInput(filename, payload(list(blocks)), blocks))
+                inputs.append(ExtractionInput(filename, payload(list(blocks)), blocks,
+                                              source_file_hash=source_file_hash))
         for page in parsed.vision_pages:
             locator = getattr(page, "locator", {}) or {}
             image_index = locator.get("image")
@@ -619,10 +743,52 @@ class ProcessingPipeline:
                 if locator
                 else ()
             )
-            inputs.append(ExtractionInput(filename, page.image_bytes, context, page.page))
+            inputs.append(ExtractionInput(filename, page.image_bytes, context, page.page,
+                                          source_file_hash))
         if not inputs:
             raise AIProviderError("AI_NO_SUPPORTED_FACTS")
         return inputs
+
+    @staticmethod
+    def _vision_source_context(
+        item: ExtractionInput, prepared: PreparedProviderInput
+    ) -> dict[str, object]:
+        """Build safe parser/OCR context for a vision request.
+
+        The image bytes are sent separately. This context carries only parser
+        positions, masked OCR text, and IDs that the local grounding pass can
+        recompute against the same image input.
+        """
+        image_hints: dict[str, Any] = {}
+        parser_context = []
+        for block in item.blocks:
+            if block.block_type != "image_context":
+                continue
+            locator = dict(block.locator)
+            image_hints.update(locator)
+            parser_context.append({"locator": locator})
+        page_hint = {"page": item.page} if isinstance(item.page, int) and item.page > 0 else {}
+        if not parser_context and page_hint:
+            parser_context.append({"locator": page_hint})
+
+        ocr_context = []
+        for block in prepared.ocr_blocks:
+            locator = {**image_hints, **block.locator, **page_hint}
+            entry: dict[str, object] = {
+                "locator": locator,
+                "text": mask_sensitive(block.text),
+            }
+            if item.source_file_hash:
+                entry["citation_id"] = deterministic_citation_id(
+                    item.source_file_hash,
+                    locator,
+                    mask_sensitive(block.text),
+                )
+            ocr_context.append(entry)
+
+        if not parser_context and not ocr_context:
+            return {}
+        return {"parser_context": parser_context, "ocr_blocks": ocr_context}
 
     @staticmethod
     def _bind_spreadsheet_sources(
@@ -675,6 +841,7 @@ class ProcessingPipeline:
         result: ExtractionResult,
         prepared: PreparedProviderInput | None = None,
         grounding: list[dict] | None = None,
+        selected_sources: list | None = None,
     ) -> tuple:
         evidence = prepared.identifier_evidence if prepared else ()
         local_hashes = prepared.identifier_hashes if prepared else {}
@@ -986,11 +1153,13 @@ class ProcessingPipeline:
                 SourceLocatorModel.locator_type == locator_type,
                 SourceLocatorModel.excerpt == excerpt,
             ))
-            if any(json.dumps(source.location, sort_keys=True, ensure_ascii=False) == location_key
-                   for source in existing_sources):
+            existing_source = next((source for source in existing_sources
+                if json.dumps(source.location, sort_keys=True, ensure_ascii=False) == location_key), None)
+            if existing_source is not None:
+                if selected_sources is not None:
+                    selected_sources.append(existing_source)
                 continue
-            session.add(
-                SourceLocatorModel(
+            stored_source = SourceLocatorModel(
                     analysis_id=analysis_id,
                     file_id=uploaded_file.id,
                     fact_id=stored_fact.id,
@@ -998,8 +1167,10 @@ class ProcessingPipeline:
                     location=location,
                     excerpt=excerpt,
                     content_hash=hashlib.sha256(excerpt.encode()).hexdigest(),
-                )
             )
+            session.add(stored_source)
+            if selected_sources is not None:
+                selected_sources.append(stored_source)
 
         if pending_reason == "multiple_employee_ids":
             for source_employee_id in sorted(employee_ids):

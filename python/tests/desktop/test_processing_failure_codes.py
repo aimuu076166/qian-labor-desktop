@@ -47,8 +47,14 @@ def test_local_privacy_failure_is_actionable_and_never_calls_provider(tmp_path):
         assert "synthetic private detail" not in str(result)
 
 
-def test_provider_diagnostic_is_persisted_as_safe_workspace_metadata(tmp_path):
+@pytest.mark.parametrize("details", [{}, {
+    "fact_index": 1, "fact_type": "employment.probation.assessment_exists",
+    "actual_value_type": "text", "expected_value_types": ("boolean", "null"),
+}])
+def test_provider_diagnostic_is_persisted_as_safe_workspace_metadata(tmp_path, details):
     from qian_labor.ai.providers import AIDiagnostic, AIProviderError
+    failure = {"category": "semantic", "path": "facts[].value_type", "validation_type": "invalid_value"} if details else {
+        "category": "json", "path": "response", "validation_type": "invalid_json"}
 
     class Provider:
         name = "synthetic-external"
@@ -56,7 +62,7 @@ def test_provider_diagnostic_is_persisted_as_safe_workspace_metadata(tmp_path):
 
         def extract(self, *args, **kwargs):
             raise AIProviderError("AI_SCHEMA_INVALID", AIDiagnostic(
-                category="json", path="response", validation_type="invalid_json", attempt=1,
+                attempt=1, **failure, **details,
             ))
 
     token = "synthetic-provider-diagnostic"
@@ -72,7 +78,10 @@ def test_provider_diagnostic_is_persisted_as_safe_workspace_metadata(tmp_path):
                     json={"paths": [str(source)]})
         result = ProcessingPipeline(app.state.database, LocalStorage(str(app.state.storage_root)), Provider()).process(aid)
         diagnostic = result["files"][0]["error_diagnostic"]
-        assert diagnostic == {"category": "json", "attempt": 1, "path": "response", "validation_type": "invalid_json"}
+        expected = {"attempt": 1, **failure, **details}
+        if "expected_value_types" in expected:
+            expected["expected_value_types"] = list(expected["expected_value_types"])
+        assert diagnostic == expected
         assert "SYN-001" not in str(diagnostic)
         workspace = client.get(f"/api/analyses/{aid}/workspace", headers=headers).json()
         assert workspace["files"][0]["error_diagnostic"] == diagnostic

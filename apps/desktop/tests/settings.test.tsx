@@ -3,6 +3,21 @@ import { describe, expect, it, vi } from 'vitest';
 import { SettingsView } from '../src/features/settings/SettingsView';
 
 describe('SettingsView', () => {
+  it('allows retesting a saved key without reading it back into the form', async () => {
+    const onSave = vi.fn(async () => undefined);
+    render(<SettingsView status={{ provider: 'zhipu', configured: true, validated: true,
+      textModel: 'glm-5.3-flash', visionModel: 'glm-5.3-flash',
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4' }} onSave={onSave} />);
+    const key = screen.getByLabelText('智谱 API Key');
+    expect(key).toHaveValue('');
+    expect(key).not.toBeRequired();
+    fireEvent.click(screen.getByRole('button', { name: '保存并测试连接' }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith({ apiKey: '',
+      textModel: 'glm-5.3-flash', visionModel: 'glm-5.3-flash',
+      baseUrl: 'https://open.bigmodel.cn/api/coding/paas/v4' }));
+    expect(key).toHaveValue('');
+  });
+
   it('submits a write-only Zhipu key with the fixed multimodal model', async () => {
     const onSave = vi.fn(async () => undefined);
     render(
@@ -21,6 +36,7 @@ describe('SettingsView', () => {
 
     const key = screen.getByLabelText('智谱 API Key');
     expect(key).toHaveAttribute('type', 'password');
+    expect(key).toBeRequired();
     expect(key).toHaveValue('');
     expect(screen.getByLabelText('分析模型')).toHaveValue('glm-5.3-flash');
     expect(screen.getByLabelText('分析模型')).toHaveAttribute('readonly');

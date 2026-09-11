@@ -125,6 +125,31 @@ def wait_worker(app):
         future.result(5)
 
 
+def test_processed_materials_finish_task_even_when_business_review_is_partial(tmp_path, monkeypatch):
+    from qian_labor.jobs.processing import ProcessingPipeline
+    original = ProcessingPipeline.process
+
+    def reviewed_process(self, aid):
+        result = original(self, aid)
+        # Material processing succeeded, but human evidence review is pending.
+        assert all(f["status"] == "processed" for f in result["files"])
+        with self.database.session() as session:
+            analysis = session.get(AnalysisBatch, aid)
+            analysis.status = analysis.current_stage = "partial"
+            session.commit()
+        return {**result, "status": "partial"}
+
+    monkeypatch.setattr(ProcessingPipeline, "process", reviewed_process)
+    with api_case(tmp_path) as (app, client, aid, files, base):
+        assert client.post(base + "/start", json=request_body()).status_code == 202
+        wait_worker(app)
+        state = client.get(base).json()
+        assert state["business_status"] == "partial"
+        assert state["run"]["state"] == "completed"
+        assert state["resume_preview"]["reusable_file_ids"] == files
+        assert state["resume_preview"]["extraction_file_ids"] == []
+
+
 def test_cancel_before_adapter_starts_no_usage_or_facts(tmp_path, monkeypatch):
     from qian_labor.jobs.processing import ProcessingPipeline
     entered, release = Event(), Event()

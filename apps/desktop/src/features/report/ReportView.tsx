@@ -85,6 +85,7 @@ function sourceLocation(location: Record<string, unknown>): string {
   const parts: string[] = [];
   if (typeof location.sheet === 'string') parts.push(location.sheet);
   if (typeof location.paragraph === 'number') parts.push(`第 ${location.paragraph} 段`);
+  if (typeof location.image === 'number') parts.push(`第 ${location.image} 张图片`);
   if (typeof location.row === 'number') parts.push(`第 ${location.row} 行`);
   if (typeof location.cell === 'string') parts.push(location.cell);
   if (typeof location.page === 'number') parts.push(`第 ${location.page} 页`);

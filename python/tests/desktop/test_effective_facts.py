@@ -12,6 +12,7 @@ from qian_labor.models.core import EmploymentFact, SourceLocator, UploadedFile
 
 def add_fact(db, aid, name, value, *, file_id=None, unlocated=False):
     import hashlib
+    from qian_labor.ai.grounding import EXTRACTION_VERSION
     from qian_labor.services.source_provenance import deterministic_citation_id
     with db.session() as s:
         original = s.scalar(select(EmploymentFact).where(EmploymentFact.analysis_id == aid))
@@ -21,7 +22,7 @@ def add_fact(db, aid, name, value, *, file_id=None, unlocated=False):
         s.add(fact)
         s.flush()
         excerpt = "" if unlocated else "合成原材料"
-        location = {"_grounding": {"version": "parser-grounding-v2", "status": "unlocated_needs_review" if unlocated else "locally_located"}}
+        location = {"_grounding": {"version": EXTRACTION_VERSION, "status": "unlocated_needs_review" if unlocated else "locally_located"}}
         file = s.get(UploadedFile, fact.file_id)
         location["_citation_id"] = deterministic_citation_id(file.sha256, location, excerpt)
         source = SourceLocator(analysis_id=aid, fact_id=fact.id, file_id=fact.file_id, locator_type="document",
@@ -55,6 +56,40 @@ def revision_body(row, value=False, kind="correct"):
             "expected_source_signature": row["source_signature"]}
 
 
+def test_processed_file_with_unlocated_current_source_is_not_complete(api, tmp_path):
+    client, db, c, rec, aid, base = prepared(api, tmp_path)
+    add_fact(db, aid, 'employment.probation.start_date', '2026-01-01', unlocated=True)
+    state = client.get(base + '/assessment-results').json()['assessment_revision']
+    assert state['availability'] == 'available'
+    assert state['completeness'] == 'partial'
+
+
+def test_recovered_fact_risk_context_uses_only_current_evidence(api, tmp_path):
+    import hashlib
+    from qian_labor.ai.grounding import EXTRACTION_VERSION, deterministic_citation_id
+    from qian_labor.models.core import AuditEvent
+    from qian_labor.services.risk_evaluation import RiskEvaluationService
+    _, db, _, _, aid, _ = prepared(api, tmp_path)
+    fid = add_fact(db, aid, 'employment.probation.assessment_exists', True, unlocated=True)
+    with db.session() as s:
+        fact = s.get(EmploymentFact, fid)
+        file = s.get(UploadedFile, fact.file_id)
+        quote = '已留存考核表'
+        location = {'sheet': 'synthetic', 'row': 2, 'column': '4', '_grounding': {
+            'version': EXTRACTION_VERSION, 'status': 'locally_located', 'requires_review': False}}
+        location['_citation_id'] = deterministic_citation_id(file.sha256, location, quote)
+        source = SourceLocator(analysis_id=aid, fact_id=fid, file_id=file.id, locator_type='cell',
+            location=location, excerpt=quote, content_hash=hashlib.sha256(quote.encode()).hexdigest())
+        s.add(source)
+        s.flush()
+        s.add(AuditEvent(analysis_id=aid, event_type='extraction_grounding_completed',
+            metadata_json={'file_id': file.id, 'source_ids': [source.id]}))
+        s.commit()
+        context = RiskEvaluationService._context_facts(s, [fact])['employment.probation.assessment_exists']
+        assert context.value is True and context.conflicted is False
+        assert context.source_locator_ids == (source.id,)
+
+
 def test_human_correction_immutable_sources_cas_and_reconciliation(api, tmp_path):
     client, db, c, rec, aid, base = prepared(api, tmp_path)
     response = client.get(base + "/effective-facts", params={"record_id": rec["id"]})
@@ -75,6 +110,95 @@ def test_human_correction_immutable_sources_cas_and_reconciliation(api, tmp_path
     with db.session() as s:
         assert s.get(EmploymentFact, row["id"]).value_json == original
         assert [(x.id, x.location, x.excerpt, x.content_hash) for x in s.scalars(select(SourceLocator))] == sources
+
+
+def test_workspace_counts_current_projection_not_all_extraction_versions(api, tmp_path):
+    from qian_labor.services.effective_facts import effective_projection
+
+    client, db, company_row, record_row, aid, base = prepared(api, tmp_path)
+    with db.session() as session:
+        original = session.scalar(select(EmploymentFact).where(EmploymentFact.analysis_id == aid))
+        file_id = original.file_id
+    legacy_id = add_fact(db, aid, "employment.probation.start_date", "2026-01-01", file_id=file_id)
+    with db.session() as session:
+        for source in session.scalars(select(SourceLocator).where(SourceLocator.fact_id == legacy_id)):
+            source.location = {**source.location, "_grounding": {
+                "version": "parser-grounding-v2", "status": "unlocated_needs_review"}}
+        session.commit()
+        expected = sum(row.file_id == file_id for row in effective_projection(session, aid))
+    response = client.get(f"/api/analyses/{aid}/workspace")
+    assert response.status_code == 200
+    material_row = next(row for row in response.json()["files"] if row["id"] == file_id)
+    assert material_row["fact_count"] == expected
+    with db.session() as session:
+        assert session.get(EmploymentFact, legacy_id) is not None
+
+
+def test_v2_fact_revision_and_frozen_report_survive_v3_reextraction(api, tmp_path):
+    from qian_labor.ai.grounding import EXTRACTION_VERSION
+    from qian_labor.models.core import AnalysisBatch, EffectiveFactRevision, EmploymentFact, SourceLocator, ProcessingJob
+    from qian_labor.services.effective_facts import effective_projection
+    from qian_labor.storage.local import LocalStorage
+    from qian_labor.jobs.processing import ProcessingPipeline
+    from test_current_company import SyntheticMaterialProvider
+
+    client, db, c, rec, aid, base = prepared(api, tmp_path)
+    row = client.get(base + "/effective-facts").json()["items"][0]
+    revision = client.post(base + f'/effective-facts/{row["id"]}/revisions', json=revision_body(row, False))
+    assert revision.status_code == 200, revision.text
+
+    context = client.get(base + "/report-versions").json()["current_context"]
+    report_request = {
+        "request_id": str(uuid4()),
+        "expected_input_revision": context["input_revision"],
+        "expected_result_revision": context["result_revision"],
+        "expected_review_revision": context["review_revision"],
+        "expected_context_signature": context["context_signature"],
+    }
+    report_response = client.post(base + "/report-versions", json=report_request)
+    assert report_response.status_code == 201, report_response.text
+    frozen = report_response.json()["snapshot"]
+
+    with db.session() as session:
+        old_fact = session.get(EmploymentFact, row["id"])
+        assert old_fact is not None
+        old_fact.dedupe_key = "legacy-v2-" + str(uuid4())
+        for source in session.scalars(select(SourceLocator).where(SourceLocator.fact_id == old_fact.id)):
+            proof = dict(source.location.get("_grounding", {}))
+            proof["version"] = "parser-grounding-v2"
+            source.location = {**source.location, "_grounding": proof}
+        old_job = session.scalar(select(ProcessingJob).where(
+            ProcessingJob.analysis_id == aid, ProcessingJob.file_id == old_fact.file_id,
+            ProcessingJob.job_type == "extract"))
+        assert old_job is not None
+        old_job.unique_key = f"{aid}:{old_fact.file_id}:extract:{session.get(UploadedFile, old_fact.file_id).sha256}:parser-grounding-v2:contract-advisory-v1"
+        session.get(AnalysisBatch, aid).status = "created"
+        session.commit()
+        old_id = old_fact.id
+
+    pipeline = ProcessingPipeline(db, LocalStorage(str(client.app.state.storage_root)),
+                                  provider=SyntheticMaterialProvider())
+    pipeline.process(aid)
+
+    with db.session() as session:
+        facts = list(session.scalars(select(EmploymentFact).where(EmploymentFact.analysis_id == aid)))
+        assert old_id in {fact.id for fact in facts}
+        new_facts = [fact for fact in facts if fact.id != old_id and fact.file_id == row["file_id"]]
+        assert new_facts
+        assert any(
+            source.location.get("_grounding", {}).get("version") == EXTRACTION_VERSION
+            for fact in new_facts
+            for source in session.scalars(select(SourceLocator).where(SourceLocator.fact_id == fact.id))
+        )
+        old_revision = session.scalar(select(EffectiveFactRevision).where(EffectiveFactRevision.fact_id == old_id))
+        assert old_revision is not None and old_revision.value is False
+        current_rows = effective_projection(session, aid)
+        assert old_id not in {fact.id for fact in current_rows}
+        assert {fact.id for fact in new_facts} & {fact.id for fact in current_rows}
+
+    reopened = client.get(base + "/report-versions/" + frozen["id"])
+    assert reopened.status_code == 200
+    assert reopened.json()["snapshot"] == frozen
 
 
 def test_strict_manual_shapes():
@@ -403,10 +527,14 @@ def test_ten_employee_real_mixed_inputs_local_corrections_consistent_without_pro
                     "correct" if row["fact_type"].endswith("end_date") else "confirm"))
                 assert response.status_code == 200, response.text
     result = local_evaluate(client, base)
-    # Embedded DOCX images are now sent through the same local-privacy/vision
-    # path as standalone images; the complete synthetic corpus can therefore
-    # reach a complete local reevaluation once the facts are confirmed.
-    assert result["fresh"] and result["completeness"] == "complete"
+    # The fixture also returns row-context metadata as an excerpt and leaves
+    # unlocated observations. Successful processing is not complete evidence.
+    from qian_labor.services.effective_facts import effective_projection
+    from qian_labor.services.source_provenance import grounding_requires_review
+    with db.session() as session:
+        assert any(grounding_requires_review(src.location)
+                   for row in effective_projection(session, aid) for src in row.state.sources)
+    assert result["fresh"] and result["completeness"] == "partial"
     assert provider.calls == before_calls
     workbench = client.get(f'/api/company-workspaces/{co["id"]}/current').json()
     assert len(workbench["employees"]) == 10

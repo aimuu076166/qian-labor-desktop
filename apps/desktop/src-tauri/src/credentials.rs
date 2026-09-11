@@ -173,7 +173,7 @@ pub fn configure_provider<S: SecretStore>(
     let text_model = input.text_model.trim();
     let vision_model = input.vision_model.trim();
     let base_url = input.base_url.trim().trim_end_matches('/');
-    if !(8..=4096).contains(&api_key.len())
+    if (!api_key.is_empty() && !(8..=4096).contains(&api_key.len()))
         || text_model != ZHIPU_MODEL
         || vision_model != ZHIPU_MODEL
         || !is_allowed_base_url(base_url)
@@ -181,7 +181,15 @@ pub fn configure_provider<S: SecretStore>(
         return Err("DESKTOP_PROVIDER_CONFIGURATION_INVALID".to_string());
     }
 
-    store.set(API_KEY_ACCOUNT, api_key.as_bytes())?;
+    if api_key.is_empty() {
+        // Blank means reuse, never erase or return the stored secret to the UI.
+        match store.get(API_KEY_ACCOUNT)? {
+            Some(value) if (8..=4096).contains(&value.len()) => {}
+            _ => return Err("DESKTOP_PROVIDER_CONFIGURATION_INVALID".to_string()),
+        }
+    } else {
+        store.set(API_KEY_ACCOUNT, api_key.as_bytes())?;
+    }
     let pepper = match store.get(PII_PEPPER_ACCOUNT)? {
         Some(value) if value.len() >= 32 => value,
         _ => {
@@ -430,6 +438,23 @@ mod tests {
             vision_model: "glm-5.3-flash".to_string(),
             base_url: ZHIPU_BASE_URL.to_string(),
         }
+    }
+
+    #[test]
+    fn blank_input_reuses_saved_key_and_pepper_without_clearing_them() {
+        let directory = temporary_directory("reuse-saved-key");
+        let store = MemorySecretStore::default();
+        configure_provider(&store, &directory, input()).unwrap();
+        let before = store.values.lock().unwrap().clone();
+        let mut retry = input();
+        retry.api_key.clear();
+        retry.base_url = ZHIPU_CODING_PLAN_BASE_URL.to_string();
+        let status = configure_provider(&store, &directory, retry).unwrap();
+        assert!(status.configured);
+        assert!(!status.validated);
+        assert_eq!(store.values.lock().unwrap().clone(), before);
+        assert_eq!(status.base_url, ZHIPU_CODING_PLAN_BASE_URL);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(unix)]

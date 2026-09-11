@@ -49,6 +49,8 @@ def provider_from_settings(settings: Settings) -> AIProvider:
             base_url,
             text_model,
             vision_model,
+            # Desktop retries require an explicit user action, not hidden calls.
+            max_attempts=1,
             batch_budget_usd=settings.ai_batch_budget_usd,
             privacy_boundary=privacy_boundary,
         )

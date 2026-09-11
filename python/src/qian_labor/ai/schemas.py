@@ -38,6 +38,9 @@ class SourceLocator(BaseModel):
     block: int | None = None
     excerpt: str = ""
     bbox: tuple[float, float, float, float] | None = None
+    # Provider-facing stable identity. Persistence stores its own recomputed
+    # `_citation_id`; this field is never trusted as proof.
+    citation_id: str | None = Field(default=None, min_length=1, max_length=80)
 
 
 class EmploymentFact(BaseModel):
@@ -154,8 +157,11 @@ class ProviderSource(BaseModel):
     paragraph: int | None
     table: int | None = None
     image: int | None = None
+    cell: str | None = None
+    block: int | None = None
     excerpt: str
     bbox: list[FiniteFloat] | None
+    citation_id: str | None = Field(default=None, min_length=1, max_length=80)
 
     @field_validator("bbox")
     @classmethod

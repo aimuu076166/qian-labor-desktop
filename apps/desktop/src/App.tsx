@@ -208,7 +208,9 @@ export function App({
   } : null);
   const legacyEligible = taskHistory?.relation === 'unbound' && ['created', 'uploading', 'failed'].includes(taskHistory.status);
   const analysisRunning = !historical && (task.active || Boolean(task.busy || task.pending));
-  const currentDashboard = useQuery<DashboardPayload>({ queryKey: ['current-dashboard', activeCurrentId, company.current.data?.current_analysis?.analysis_version],
+  const currentDashboard = useQuery<DashboardPayload>({ queryKey: ['current-dashboard', activeCurrentId,
+    company.current.data?.current_analysis?.analysis_version,
+    company.current.data?.current_analysis?.assessment_revision?.result_revision],
     enabled: Boolean(api && activeCurrentId && !company.current.data?.current_analysis?.stale), retry: false,
     queryFn: ({ signal }) => readJson<DashboardPayload>(api!(`/api/analyses/${activeCurrentId}/dashboard`, { signal })) });
 

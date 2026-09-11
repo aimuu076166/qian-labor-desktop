@@ -9,6 +9,22 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 describe('analysis report', () => {
   beforeEach(() => { vi.mocked(invoke).mockReset(); });
 
+  it('prints the embedded image ordinal and paragraph without inventing a Word page', () => {
+    const payload = structuredClone(reportSourcePrivacy.snapshot.payload) as ReportPayload;
+    payload.findings = [{
+      id: 'image-finding', rule_id: 'R01', title: '合成图片来源核对',
+      severity_label: '资料不足', status_label: '待核对',
+      requires_human_review: true, employee_name: '虚构员**', sources: [{
+      file_name: '合成嵌图合同.docx', locator_type: 'image',
+      location: { paragraph: 2, image: 3 },
+    }] }];
+    render(<ReportView payload={payload} onBack={vi.fn()} />);
+    const source = screen.getByText(/合成嵌图合同\.docx/);
+    expect(source).toHaveTextContent('第 2 段 · 第 3 张图片');
+    expect(source).not.toHaveTextContent('第 1 页');
+    expect(source.closest('.print-hidden')).toBeNull();
+  });
+
   it('attributes each printed fact to its captured employee or explicit unknown without mutating the snapshot', () => {
     const original = structuredClone(reportSourcePrivacy.snapshot.payload);
     const first = original.facts[0];

@@ -139,6 +139,7 @@ def test_built_verifier_rejects_ocr_failure_without_printing_child_output(monkey
 def _trace_case():
     import tempfile
     from docx import Document
+    from qian_labor.ai.grounding import EXTRACTION_VERSION
     with tempfile.TemporaryDirectory() as folder:
         fixture = Path(folder) / "fixture.docx"
         _load_harness()._write_fixture(fixture)
@@ -149,7 +150,7 @@ def _trace_case():
                 "provenance": "locally_located"} for i in range(2)]
     bindings = {source["id"]: {
         **source, "source_analysis_id": "analysis", "fact_analysis_id": "analysis",
-        "location": {"paragraph": 2, "_grounding": {"version": "parser-grounding-v2", "status": "locally_located", "requires_review": False}},
+        "location": {"paragraph": 2, "_grounding": {"version": EXTRACTION_VERSION, "status": "locally_located", "requires_review": False}},
         "file_analysis_id": "analysis", "employee_id": "employee",
         "fact_file_id": "fixture-file", "fact_type": kind, "value": value,
     } for source, (kind, value) in zip(sources, [

@@ -69,14 +69,18 @@ def input_revision(s, analysis_id):
 def material_state(s, analysis_id):
     files = list(s.scalars(select(UploadedFile).where(UploadedFile.analysis_id == analysis_id)))
     owner = s.get(CompanyAnalysisBinding, analysis_id)
+    rows = effective_projection(s, analysis_id)
     available = any(row.state.valid and row.employee_id is not None and
                     (not owner or owner.role != "current" or row.state.owned)
-                    for row in effective_projection(s, analysis_id))
+                    for row in rows)
     pending = s.scalar(select(EmployeeMatchCandidate.id).where(EmployeeMatchCandidate.analysis_id == analysis_id,
         EmployeeMatchCandidate.status == "pending").limit(1)) is not None
     warnings = any(row.warnings for row in s.scalars(select(ParsedDocument).join(UploadedFile,
         UploadedFile.id == ParsedDocument.file_id).where(UploadedFile.analysis_id == analysis_id)))
-    incomplete = warnings or any(file.status != "processed" or file.error_code for file in files)
+    from qian_labor.services.source_provenance import grounding_requires_review
+    source_pending = any(not row.state.valid or any(grounding_requires_review(src.location)
+                         for src in row.state.sources) for row in rows)
+    incomplete = source_pending or warnings or any(file.status != "processed" or file.error_code for file in files)
     completeness = "pending" if not available or pending else "partial" if incomplete else "complete"
     return {"availability": "available" if available else "none", "completeness": completeness}
 

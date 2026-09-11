@@ -40,6 +40,182 @@ def test_docx_inputs_keep_parser_context_and_hints():
     assert b'"table": 1' in item.content
 
 
+def test_extraction_request_carries_stable_source_ids_and_grounds_by_id():
+    import hashlib
+    from qian_labor.ai.grounding import ground_result
+    from qian_labor.services.source_provenance import deterministic_citation_id
+
+    workbook = Workbook()
+    workbook.active.title = "工资表"
+    workbook.active.append(["员工编号", "实际工资"])
+    workbook.active.append(["SYN-001", 9000])
+    output = BytesIO()
+    workbook.save(output)
+    content = output.getvalue()
+    parsed = ParserRegistry().parse("工资表.xlsx", content)
+    item = ProcessingPipeline._extraction_inputs("工资表.xlsx", content, parsed)[0]
+    wage = next(block for block in parsed.blocks if block.locator.get("cell") == "B2")
+    expected = deterministic_citation_id(
+        hashlib.sha256(content).hexdigest(),
+        {key: wage.locator[key] for key in ("sheet", "row", "column", "cell")},
+        wage.text,
+    )
+
+    assert expected in item.content.decode("utf-8")
+    extracted = ExtractionResult.model_validate({
+        "employee_number": "SYN-001",
+        "facts": [{
+            "employee_id": "SYN-001",
+            "fact_type": "employment.pay.actual_wage",
+            "value": 9000,
+            "confidence": 1,
+            "source": {
+                "file_name": "model-output",
+                "excerpt": wage.text,
+                "sheet": "工资表",
+                "row": 2,
+                "column": "2",
+                "cell": "B2",
+                "citation_id": expected,
+            },
+        }],
+    })
+
+    proofs = ground_result(extracted, item, "工资表.xlsx")
+
+    assert proofs[0]["status"] == "locally_located"
+    assert extracted.facts[0].source.sheet == "工资表"
+    assert extracted.facts[0].source.row == 2
+    assert extracted.facts[0].source.cell == "B2"
+    assert extracted.facts[0].source.excerpt == wage.text
+    assert expected == deterministic_citation_id(
+        hashlib.sha256(content).hexdigest(),
+        extracted.facts[0].source.model_dump(
+            exclude={"file_name", "excerpt"}, exclude_none=True
+        ),
+        extracted.facts[0].source.excerpt,
+    )
+
+    row_text = "SYN-001 | 9000"
+    row_citation_id = deterministic_citation_id(
+        hashlib.sha256(content).hexdigest(),
+        {"sheet": "工资表", "row": 2},
+        row_text,
+    )
+    assert row_citation_id in item.content.decode("utf-8")
+    row_extracted = ExtractionResult.model_validate({
+        "employee_number": "SYN-001",
+        "facts": [{
+            "employee_id": "SYN-001",
+            "fact_type": "employment.pay.actual_wage",
+            "value": 9000,
+            "confidence": 1,
+            "source": {
+                "file_name": "model-output",
+                "excerpt": row_text,
+                "sheet": "工资表",
+                "row": 2,
+                "citation_id": row_citation_id,
+            },
+        }],
+    })
+
+    row_proofs = ground_result(row_extracted, item, "工资表.xlsx")
+
+    assert row_proofs[0]["status"] == "locally_located"
+    assert row_proofs[0]["requires_review"] is True
+    assert row_extracted.facts[0].needs_human_confirmation is True
+    assert row_extracted.facts[0].source.row == 2
+    assert row_extracted.facts[0].source.column is None
+    assert row_extracted.facts[0].source.excerpt == row_text
+
+
+def test_cited_empty_or_partial_excerpt_requires_human_confirmation():
+    import hashlib
+    from qian_labor.ai.grounding import ExtractionInput, deterministic_citation_id, ground_result
+    from qian_labor.ai.schemas import EmploymentFact, SourceLocator
+    from qian_labor.parsers.protocols import ParsedBlock
+
+    content = b"synthetic spreadsheet bytes"
+    blocks = (
+        ParsedBlock("SYN-001", "cell", {"sheet": "工资表", "row": 2, "column": 1, "cell": "A2"}),
+        ParsedBlock("9000", "cell", {"sheet": "工资表", "row": 2, "column": 2, "cell": "B2"}),
+    )
+    item = ExtractionInput(
+        "工资表.xlsx",
+        content,
+        blocks,
+        source_file_hash=hashlib.sha256(content).hexdigest(),
+    )
+    citation_id = deterministic_citation_id(
+        item.source_file_hash,
+        blocks[1].locator,
+        blocks[1].text,
+    )
+
+    for excerpt in ("", "900"):
+        extracted = ExtractionResult(facts=[EmploymentFact(
+            employee_id="SYN-001",
+            fact_type="employment.pay.actual_wage",
+            value=9000,
+            confidence=1,
+            source=SourceLocator(
+                file_name="model-output",
+                sheet="工资表",
+                row=2,
+                column="2",
+                cell="B2",
+                excerpt=excerpt,
+                citation_id=citation_id,
+            ),
+        )])
+
+        proofs = ground_result(extracted, item, "工资表.xlsx")
+
+        assert proofs[0]["status"] == "locally_located"
+        assert proofs[0]["requires_review"] is True
+        assert extracted.facts[0].needs_human_confirmation is True
+        assert extracted.facts[0].source.cell == "B2"
+        assert extracted.facts[0].source.excerpt == "9000"
+
+
+def test_fabricated_source_id_fails_closed_even_with_an_exact_quote():
+    from qian_labor.ai.grounding import ground_result
+
+    workbook = Workbook()
+    workbook.active.append(["员工编号", "实际工资"])
+    workbook.active.append(["SYN-001", 9000])
+    output = BytesIO()
+    workbook.save(output)
+    content = output.getvalue()
+    parsed = ParserRegistry().parse("工资表.xlsx", content)
+    item = ProcessingPipeline._extraction_inputs("工资表.xlsx", content, parsed)[0]
+    extracted = ExtractionResult.model_validate({
+        "employee_number": "SYN-001",
+        "facts": [{
+            "employee_id": "SYN-001",
+            "fact_type": "employment.pay.actual_wage",
+            "value": 9000,
+            "confidence": 1,
+            "source": {
+                "file_name": "model-output",
+                "excerpt": "9000",
+                "sheet": "Sheet",
+                "row": 2,
+                "column": "2",
+                "cell": "B2",
+                "citation_id": "cite-fabricated-source-id",
+            },
+        }],
+    })
+
+    proofs = ground_result(extracted, item, "工资表.xlsx")
+
+    assert proofs[0]["status"] == "unlocated_needs_review"
+    assert extracted.facts[0].source.excerpt == ""
+    assert extracted.facts[0].needs_human_confirmation
+
+
 def test_grounding_preserves_all_actual_occurrences_and_table_identity():
     from qian_labor.ai.grounding import ground_result
     content = word_bytes()
@@ -89,14 +265,177 @@ def test_extraction_key_is_versioned_but_parse_key_is_not():
     assert ProcessingPipeline._job_key("a", "f", "parse", "digest") == "a:f:parse:digest"
 
 
-def test_v2_extraction_does_not_reuse_v1_key_but_keeps_parse_key():
+def test_v3_extraction_does_not_reuse_v1_key_but_keeps_parse_key():
     from qian_labor.ai.grounding import EXTRACTION_VERSION
 
-    assert EXTRACTION_VERSION == "parser-grounding-v2"
+    assert EXTRACTION_VERSION == "parser-grounding-v3"
     assert ProcessingPipeline._job_key("a", "f", "parse", "digest") == "a:f:parse:digest"
     assert ProcessingPipeline._job_key("a", "f", "extract", "digest") != (
         "a:f:extract:digest:parser-grounding-v1:contract-advisory-v1"
     )
+
+
+def test_source_context_upgrade_does_not_reuse_previous_v2_job_key():
+    old_key = "a:f:extract:digest:parser-grounding-v2:contract-advisory-v1"
+    assert ProcessingPipeline._job_key("a", "f", "extract", "digest") != old_key
+    assert ProcessingPipeline._job_key("a", "f", "parse", "digest") == "a:f:parse:digest"
+
+
+def test_unlocated_spreadsheet_sources_disable_cache_until_explicit_retry(tmp_path):
+    import hashlib
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from qian_labor.ai.grounding import EXTRACTION_VERSION
+    from qian_labor.desktop.app import create_desktop_app
+    from qian_labor.models.core import AnalysisBatch, EmploymentFact, ProcessingJob, SourceLocator, UploadedFile
+    from test_workspace_api import HEADERS, TOKEN
+
+    class Provider:
+        name, is_external = "fake", False
+
+    app = create_desktop_app(data_dir=tmp_path / "app", launch_token=TOKEN)
+    with TestClient(app) as client:
+        aid = client.post("/api/analyses", headers=HEADERS, json={
+            "name": "spreadsheet source retry", "company_display_name": "fictional",
+        }).json()["id"]
+        workbook_path = tmp_path / "records.xlsx"
+        workbook = Workbook()
+        workbook.active.append(["员工编号", "试用期开始"])
+        workbook.active.append(["SYN-001", "2026-09-01"])
+        output = BytesIO()
+        workbook.save(output)
+        content = output.getvalue()
+        workbook_path.write_bytes(content)
+        imported = client.post(f"/api/analyses/{aid}/import-paths", headers=HEADERS,
+                               json={"paths": [str(workbook_path)]})
+        imported.raise_for_status()
+        with app.state.database.session() as session:
+            file = session.scalar(select(UploadedFile).where(UploadedFile.analysis_id == aid))
+            assert file is not None
+            file.status = "processed"
+            file.detected_kind = "spreadsheet"
+            job_key = ProcessingPipeline._job_key(aid, file.id, "extract", file.sha256)
+            session.add(ProcessingJob(analysis_id=aid, file_id=file.id, job_type="extract",
+                input_hash=file.sha256, unique_key=job_key, status="succeeded", attempts=1))
+            fact = EmploymentFact(analysis_id=aid, file_id=file.id, fact_type="employment.probation.start",
+                value_json="2026-09-01", normalized_value_json="2026-09-01", extraction_method="fake",
+                confidence=1.0, verification_status="needs_human_confirmation",
+                dedupe_key=hashlib.sha256(b"synthetic-unlocated-fact").hexdigest())
+            session.add(fact)
+            session.flush()
+            session.add(SourceLocator(analysis_id=aid, file_id=file.id, fact_id=fact.id,
+                locator_type="document", location={"_grounding": {
+                    "version": EXTRACTION_VERSION, "status": "unlocated_needs_review",
+                }}, excerpt="", content_hash=hashlib.sha256(b"").hexdigest()))
+            session.get(AnalysisBatch, aid).status = "completed"
+            session.commit()
+            assert ProcessingPipeline.has_unlocated_sources(session, aid, file.id) is True
+            assert ProcessingPipeline.cached_extraction(session, aid, file, Provider()) is False
+        workspace = client.get(f"/api/analyses/{aid}/workspace", headers=HEADERS)
+        workspace.raise_for_status()
+        assert workspace.json()["files"][0]["needs_reextraction"] is True
+
+
+def test_previous_v2_success_cache_requires_explicit_source_context_upgrade(tmp_path):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from qian_labor.desktop.app import create_desktop_app
+    from qian_labor.models.core import AnalysisBatch, ProcessingJob, UploadedFile
+    from qian_labor.storage.local import LocalStorage
+    from test_workspace_api import HEADERS, TOKEN
+
+    class SyntheticProvider:
+        name, is_external = "fake", False
+
+        def extract(self, filename, content):
+            return result("SYN-001 signed contract")
+
+    app = create_desktop_app(data_dir=tmp_path / "app", launch_token=TOKEN)
+    with TestClient(app) as client:
+        response = client.post("/api/analyses", headers=HEADERS, json={
+            "name": "synthetic cache upgrade", "company_display_name": "fictional",
+        })
+        response.raise_for_status()
+        aid = response.json()["id"]
+        path = tmp_path / "contract.docx"
+        path.write_bytes(word_bytes())
+        imported = client.post(f"/api/analyses/{aid}/import-paths", headers=HEADERS,
+                               json={"paths": [str(path)]})
+        imported.raise_for_status()
+        provider = SyntheticProvider()
+        pipeline = ProcessingPipeline(app.state.database,
+            LocalStorage(str(app.state.storage_root)), provider)
+        pipeline.process(aid)
+        with app.state.database.session() as session:
+            file = session.scalar(select(UploadedFile).where(UploadedFile.analysis_id == aid))
+            job = session.scalar(select(ProcessingJob).where(
+                ProcessingJob.analysis_id == aid, ProcessingJob.job_type == "extract"))
+            assert file is not None and job is not None and job.status == "succeeded"
+            job.unique_key = f"{aid}:{file.id}:extract:{file.sha256}:parser-grounding-v2:contract-advisory-v1"
+            session.get(AnalysisBatch, aid).status = "completed"
+            session.commit()
+            assert ProcessingPipeline.cached_extraction(session, aid, file, provider) is False
+        workspace = client.get(f"/api/analyses/{aid}/workspace", headers=HEADERS)
+        workspace.raise_for_status()
+        assert workspace.json()["files"][0]["needs_reextraction"] is True
+
+
+def test_v2_retry_runs_once_then_v3_cache_reuses_without_read_calls(tmp_path):
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+    from qian_labor.desktop.app import create_desktop_app
+    from qian_labor.models.core import AnalysisBatch, ProcessingJob, UploadedFile
+    from qian_labor.storage.local import LocalStorage
+    from test_workspace_api import HEADERS, TOKEN
+
+    class CountingProvider:
+        name, is_external, calls = "fake", False, 0
+
+        def extract(self, filename, content):
+            self.calls += 1
+            return result("SYN-001 signed contract")
+
+    app = create_desktop_app(data_dir=tmp_path / "app", launch_token=TOKEN)
+    with TestClient(app) as client:
+        response = client.post("/api/analyses", headers=HEADERS, json={
+            "name": "synthetic retry", "company_display_name": "fictional",
+        })
+        response.raise_for_status()
+        aid = response.json()["id"]
+        path = tmp_path / "contract.docx"
+        path.write_bytes(word_bytes())
+        imported = client.post(f"/api/analyses/{aid}/import-paths", headers=HEADERS,
+                               json={"paths": [str(path)]})
+        imported.raise_for_status()
+        provider = CountingProvider()
+        pipeline = ProcessingPipeline(app.state.database,
+            LocalStorage(str(app.state.storage_root)), provider)
+        with app.state.database.session() as session:
+            file = session.scalar(select(UploadedFile).where(UploadedFile.analysis_id == aid))
+            assert file is not None
+            file_id, file_hash = file.id, file.sha256
+        pipeline._process_file(aid, file_id)
+        first_count = provider.calls
+        assert first_count == 1
+
+        with app.state.database.session() as session:
+            job = session.scalar(select(ProcessingJob).where(
+                ProcessingJob.analysis_id == aid, ProcessingJob.file_id == file_id,
+                ProcessingJob.job_type == "extract"))
+            assert job is not None and job.status == "succeeded"
+            job.unique_key = f"{aid}:{file_id}:extract:{file_hash}:parser-grounding-v2:contract-advisory-v1"
+            session.get(AnalysisBatch, aid).status = "created"
+            session.commit()
+
+        pipeline._process_file(aid, file_id)
+        assert provider.calls == first_count + 1
+        pipeline._process_file(aid, file_id)
+        assert provider.calls == first_count + 1
+
+        for url in (f"/api/analyses/{aid}/workspace", f"/api/analyses/{aid}/report"):
+            response = client.get(url, headers=HEADERS)
+            assert response.status_code == 200, response.text
+        assert provider.calls == first_count + 1
 
 
 def test_zhipu_text_limit_fails_before_transport():
@@ -131,6 +470,45 @@ def test_required_ocr_context_is_reused_once_and_masked():
     assert hasattr(prepared, "ocr_blocks"), "Required redaction OCR context is discarded"
     assert prepared.ocr_blocks[0].text == "SYN-001 signed contract"
     assert prepared.ocr_blocks[0].locator["bbox"] == [2, 4, 202, 24]
+
+
+def test_vision_request_context_keeps_embedded_image_locator_and_ocr_identity():
+    import hashlib
+    from qian_labor.ai.grounding import ExtractionInput, deterministic_citation_id
+    from qian_labor.parsers.protocols import ParsedBlock
+    from qian_labor.security.local_redaction import PreparedProviderInput
+
+    image_bytes = b"synthetic-image"
+    item = ExtractionInput(
+        "embedded-warning.docx-image-1.png",
+        image_bytes,
+        (ParsedBlock("", "image_context", {"paragraph": 2, "image": 1}),),
+        None,
+        hashlib.sha256(image_bytes).hexdigest(),
+    )
+    prepared = PreparedProviderInput(
+        item.filename,
+        image_bytes,
+        {},
+        ocr_blocks=(ParsedBlock(
+            "SYN-001 signed contract",
+            "ocr_line",
+            {"block": 1, "bbox": [2, 4, 202, 24]},
+        ),),
+    )
+
+    context = ProcessingPipeline._vision_source_context(item, prepared)
+
+    assert context["parser_context"] == [{"locator": {"paragraph": 2, "image": 1}}]
+    ocr = context["ocr_blocks"][0]
+    assert ocr["locator"] == {
+        "paragraph": 2, "image": 1, "block": 1, "bbox": [2, 4, 202, 24]
+    }
+    assert ocr["citation_id"] == deterministic_citation_id(
+        item.source_file_hash,
+        ocr["locator"],
+        "SYN-001 signed contract",
+    )
 
 
 def test_legacy_sources_are_readonly_labeled_and_new_unlocated_forces_review(review_case):
@@ -462,7 +840,7 @@ def test_ten_employee_mixed_pipeline_sources_and_retry(tmp_path):
             text = OCR_LINE if filename.endswith((".png", ".jpg")) else content.decode()
             facts = []
             for line in text.splitlines():
-                if line.startswith("[source"):
+                if line.startswith(("[source", "[row_context")):
                     continue
                 match = re.search(r"SYN-\d{3}", line)
                 if match:
@@ -608,7 +986,7 @@ def test_cross_file_same_value_keeps_owned_facts_and_unlocated_uncertainty(revie
             if state == "unlocated_needs_review":
                 extracted.facts[0].source.excerpt = ""
             pipeline._persist_result(session, aid, file, extracted, grounding=[{
-                "version": "parser-grounding-v2", "status": state, "requires_review": False}])
+                "version": "parser-grounding-v3", "status": state, "requires_review": False}])
         session.flush()
         facts = list(session.scalars(select(EmploymentFact).where(EmploymentFact.analysis_id == aid,
             EmploymentFact.extraction_method == pipeline.provider.name)))

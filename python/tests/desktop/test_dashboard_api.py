@@ -16,6 +16,24 @@ TOKEN = "desktop-dashboard-api-token"
 HEADERS = {"X-Qian-Desktop-Token": TOKEN}
 
 
+def test_unverified_finding_not_counted_as_risk_in_overview_ledger_or_report(tmp_path):
+    app = create_desktop_app(data_dir=tmp_path / 'app', launch_token=TOKEN)
+    seeded = _seed_completed_analysis(app)
+    with app.state.database.session() as session:
+        session.get(RiskFinding, seeded['finding_id']).assessment_status = 'requires_human_review'
+        session.commit()
+    aid = seeded['analysis_id']
+    with TestClient(app, headers=HEADERS) as client:
+        dashboard = client.get(f'/api/analyses/{aid}/dashboard').json()['overview']
+        ledger = client.get(f'/api/analyses/{aid}/employees').json()
+        report = client.get(f'/api/analyses/{aid}/report').json()
+    assert dashboard['summary']['high_count'] == 0
+    assert dashboard['summary']['requires_human_review_count'] == 1
+    assert ledger['items'][0]['risk_counts']['high'] == 0
+    assert report['summary']['high_count'] == 0
+    assert len(report['findings']) == 1  # Preserve the review item, do not hide it.
+
+
 def _seed_completed_analysis(app) -> dict[str, str]:
     with app.state.database.session() as session:
         analysis = AnalysisBatch(

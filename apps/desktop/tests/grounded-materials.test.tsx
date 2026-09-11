@@ -61,3 +61,13 @@ it('source detail labels all provenance states without claiming model text as or
   expect(screen.getByText(/旧版来源未经本地核验/)).toBeInTheDocument();
   expect(screen.getByText(/定位仅证明文字所在位置/)).toBeInTheDocument();
 });
+
+it('labels fact counts as current or historical extraction output', () => {
+  const payload = { analysis: { id: 'synthetic', name: '合成材料', company_display_name: '虚构企业', status: 'processed' },
+    files: [{ id: 'file', filename: 'synthetic.xlsx', status: 'processed', progress: 100, detected_kind: 'xlsx', classified_kind: 'assessment',
+      error_code: null, size_bytes: 10, fact_count: 30 }] } satisfies WorkspacePayload;
+  const { rerender } = render(<MaterialWorkspace payload={payload} configured busy={false} onAdd={vi.fn()} onBack={vi.fn()} onProcess={vi.fn()} />);
+  expect(screen.getByText('当前提取事实')).toBeInTheDocument();
+  rerender(<MaterialWorkspace payload={payload} configured busy={false} readOnly onAdd={vi.fn()} onBack={vi.fn()} onProcess={vi.fn()} />);
+  expect(screen.getByText('该批次提取事实')).toBeInTheDocument();
+});

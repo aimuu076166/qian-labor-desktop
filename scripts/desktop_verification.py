@@ -23,6 +23,7 @@ from docx import Document
 
 from qian_labor.rules.catalog import RULE_IDS
 from qian_labor.rules.registry import RULE_REGISTRY
+from qian_labor.ai.grounding import EXTRACTION_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -313,7 +314,7 @@ def _verify_source_trace(
     expected_excerpt = fixture_excerpt if fixture_excerpt is not None else _fixture_text()
     public_location = {"paragraph": 2}
     stored_location = {"paragraph": 2, "_grounding": {
-        "version": "parser-grounding-v2", "status": "locally_located", "requires_review": False,
+        "version": EXTRACTION_VERSION, "status": "locally_located", "requires_review": False,
     }}
     fixture_sha256 = next((binding.get("file_sha256") for binding in bindings.values()
                            if binding.get("file_id") == fixture_file_id), None)

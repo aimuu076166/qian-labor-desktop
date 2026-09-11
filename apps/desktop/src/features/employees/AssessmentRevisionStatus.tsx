@@ -7,8 +7,8 @@ function shortRevision(value: string | null) {
 export function AssessmentRevisionStatus({ revision }: { revision?: AssessmentRevision | null }) {
   if (!revision) return null;
   const availability = revision.availability === 'none' ? '无可用事实' : '已有可用事实';
-  const completeness = revision.completeness === 'complete' ? '材料完整'
-    : revision.completeness === 'partial' ? '部分可用，仍有材料未完整读取' : '材料仍待补充或确认';
+  const completeness = revision.completeness === 'complete' ? '材料处理完成（不代表资料齐全）'
+    : revision.completeness === 'partial' ? '部分可用，仍有材料或来源待核对' : '材料仍待补充或确认';
   return <section className={`assessment-revision ${revision.fresh ? 'is-fresh' : 'is-stale'}`} aria-label="当前结果版本">
     <strong>{revision.fresh ? '当前结果与已保存事实一致' : '结果待重新评估'}</strong>
     <span>{availability} · {completeness}</span>

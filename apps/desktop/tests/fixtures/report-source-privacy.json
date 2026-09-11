@@ -10,7 +10,7 @@
     "outcome": "accepted",
     "error_code": null,
     "version_id": "c14a17eb-1fce-4b67-a608-e5b236e3ab7c",
-    "content_sha256": "4a65bbcba3ddd52e5d179a337d901c250d23d0f856f8ab15abc1a69868490146"
+    "content_sha256": "12802d286190748669d5e15734c2df23cd663a6eef133a2f7954645e88df99e6"
   },
   "snapshot": {
     "id": "c14a17eb-1fce-4b67-a608-e5b236e3ab7c",
@@ -18,7 +18,7 @@
     "analysis_id": "51c80dad-3178-4bc6-9fa1-9529744ff51d",
     "version": 1,
     "created_at": "2026-09-08T23:37:26.124722+00:00",
-    "content_sha256": "4a65bbcba3ddd52e5d179a337d901c250d23d0f856f8ab15abc1a69868490146",
+    "content_sha256": "12802d286190748669d5e15734c2df23cd663a6eef133a2f7954645e88df99e6",
     "input_revision": "9de0d10afd000ed8c3ffa301acdeface239e83a83937a6922783ad69db348b9d",
     "result_revision": null,
     "review_revision": "797e3dc8a48bf4fe78ba892d5e966be12cef8bef05dc91043d6421768de0b5c0",
@@ -73,7 +73,7 @@
         "availability": "available",
         "check_date": "2026-09-09",
         "check_date_explicit": false,
-        "completeness": "complete",
+        "completeness": "partial",
         "evaluated_at": null,
         "evaluated_input_revision": null,
         "fresh": false,
@@ -185,6 +185,7 @@
       "is_demo": false,
       "limitations": [
         "本报告为已保存的复核草稿，不构成无风险保证；模型建议未经核验且不计入确定性风险统计。",
+        "材料、人员匹配或解析仍不完整，结论覆盖受限。",
         "当前资料尚无同版本体检结果；须复核并显式重新体检。",
         "存在待确认事实、当前合同依据或待核对来源。"
       ],

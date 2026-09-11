@@ -35,6 +35,22 @@ function fixture(extra?: (path: string, init?: RequestInit) => Promise<Response 
   });
 }
 describe('production company workbench', () => {
+  it('refreshes priority totals when reevaluation changes the result but not the corpus version', async () => {
+    let revision = 'result-old';
+    const request = fixture(async path => {
+      if (path.startsWith(`/api/company-workspaces/${company.id}/current?`)) return json({ ...projection,
+        current_analysis: { analysis_id: 'current', status: 'completed', stale: false, analysis_version: 1,
+          assessment_revision: { result_revision: revision, fresh: true, completeness: 'complete' } } });
+      if (path === '/api/analyses/current/dashboard') return json({
+        summary: { high_count: 0, medium_count: 0, insufficient_data_count: revision === 'result-old' ? 20 : 130 }, findings: [] });
+    });
+    mount(request);
+    await screen.findByText(/当前重点：高风险 0 · 中风险 0 · 资料不足 20/);
+    revision = 'result-new';
+    fireEvent.change(screen.getByLabelText('搜索员工'), { target: { value: 'SYN' } });
+    await screen.findByText(/当前重点：高风险 0 · 中风险 0 · 资料不足 130/);
+    expect(request.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(0);
+  });
   it.each(['accepted', 'timeout'] as const)('resolves actual schema-masked creation through canonical point GET: %s', async outcome => {
     vi.spyOn(crypto, 'randomUUID').mockReturnValue(canonicalCreation.request.id as `${string}-${string}-${string}-${string}-${string}`);
     let sent = false, visible = false;
@@ -261,7 +277,7 @@ describe('production company workbench', () => {
     mount(request);
     expect(await screen.findByText('已建档员工 10 人')).toBeInTheDocument();
     expect(screen.getByText('结果待重新评估')).toBeInTheDocument();
-    expect(screen.getByText(/部分可用，仍有材料未完整读取/)).toBeInTheDocument();
+    expect(screen.getByText(/部分可用，仍有材料或来源待核对/)).toBeInTheDocument();
     const priorities = (await screen.findByText(/当前重点：高风险 2 · 中风险 1 · 资料不足 3/)).closest('details');
     expect(priorities).not.toHaveAttribute('open');
     expect(screen.getAllByRole('button', { name: /查看合成员/ }).slice(0, 3)).toHaveLength(3);

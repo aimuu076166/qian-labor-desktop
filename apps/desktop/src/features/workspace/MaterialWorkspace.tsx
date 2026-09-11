@@ -48,7 +48,7 @@ export function MaterialWorkspace({ payload, configured, busy, error, onAdd, onP
     {importResults?.length ? <ImportResults results={importResults} /> : null}
     {processDisabled ? <p role="status">当前任务正在处理或等待恢复，暂不能添加材料或开始分析；请等待任务结束后再操作。</p> : null}
     <div className="table-scroll"><table className="employee-table"><thead><tr>
-      <th>材料</th><th>状态</th><th>识别类型</th><th>已提取事实</th><th>处理信息</th>
+      <th>材料</th><th>状态</th><th>识别类型</th><th>{readOnly ? '该批次提取事实' : '当前提取事实'}</th><th>处理信息</th>
     </tr></thead><tbody>{payload.files.map(file => <tr key={file.id}>
       <td>{file.filename}</td><td>{FILE_STATUS[file.status] ?? file.status}</td>
       <td>{file.classified_kind === 'unknown' ? '待识别' : file.classified_kind}</td>

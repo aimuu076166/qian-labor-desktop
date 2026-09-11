@@ -20,7 +20,7 @@ const revision = (fresh = false): AssessmentRevision => ({
   report_review_revision: 'c'.repeat(64), availability: 'available' as const, completeness: 'partial' as const,
 });
 
-const sources = [{ id: 'source-new', file_id: 'contract-new', locator_type: 'paragraph', location: { paragraph: 3 },
+const sources = [{ id: 'source-new', file_id: 'contract-new', locator_type: 'paragraph', location: { paragraph: 3, image: 1 },
   excerpt: '完全虚构劳动合同期限内容', provenance: 'locally_located' }];
 const baseFact = { analysis_id: 'current', employee_id: 'snapshot-one', record_id: 'record-one',
   filename: 'synthetic-renewal-contract.docx', verification_status: 'verified', version: 0, human_confirmed: false,
@@ -278,6 +278,7 @@ it('uses concrete date/boolean controls, preserves provenance and history, and r
   expandFact('历次试用期区间');
   expect(screen.getByText('原始识别值：2025-01-03')).toBeInTheDocument();
   expect(screen.getAllByText(/本地已定位.*第 3 段/).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/本地已定位.*第 3 段 · 第 1 张图片/).length).toBeGreaterThan(0);
   expect(screen.getByText(/原文未定位.*人工确认不等于解析器已定位/)).toBeInTheDocument();
   fireEvent.change(within(start).getByLabelText('合同开始日期当前值'), { target: { value: '2025-01-01' } });
   fireEvent.change(within(start).getByLabelText('更正或确认理由'), { target: { value: '对照续签合同首页日期' } });
@@ -306,7 +307,7 @@ it('uses concrete date/boolean controls, preserves provenance and history, and r
   expect(within(assessment).getByText(/synthetic-renewal-contract\.docx.*2025-01-03 至 2025-03-03/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: '仅用已保存事实重新评估' }));
   expect(await screen.findByText(/本地重新评估已完成.*结果版本 result-new/)).toBeInTheDocument();
-  expect(screen.getByText(/部分可用.*仍有材料未完整读取/)).toBeInTheDocument();
+  expect(screen.getByText(/部分可用.*仍有材料或来源待核对/)).toBeInTheDocument();
   expect(server.posts.filter(path => path.endsWith('/reevaluate'))).toHaveLength(1);
   expect(server.api.mock.calls.every(([path]) => !path.includes('provider') && !path.endsWith('/process'))).toBe(true);
 });
