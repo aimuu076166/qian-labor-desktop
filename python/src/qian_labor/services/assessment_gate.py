@@ -3,6 +3,7 @@ from typing import Any
 from sqlalchemy import Select
 
 from qian_labor.models.core import AnalysisBatch, RiskFinding
+from qian_labor.services.assessment_scope import validate_profile
 
 _GATED_STATUSES = {
     "created",
@@ -13,16 +14,20 @@ _GATED_STATUSES = {
     "extracting",
     "matching_review",
     "evaluating",
+    "cancelled",
+    "interrupted",
     "deleting",
     "deleted",
 }
 
 
 def _is_gated(analysis: AnalysisBatch) -> bool:
+    validate_profile(analysis.assessment_profile)
     return analysis.status in _GATED_STATUSES
 
 
-def restrict_findings(statement: Select[Any], analysis: AnalysisBatch) -> Select[Any]:
+def restrict_findings(statement: Select[Any], analysis: AnalysisBatch, *, current: bool = True) -> Select[Any]:
+    statement = statement.where(RiskFinding.is_current.is_(current))
     if _is_gated(analysis):
         return statement.where(RiskFinding.category == "data_quality")
     return statement

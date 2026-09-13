@@ -1,0 +1,130 @@
+import { type FormEvent, useRef, useState } from 'react';
+
+export type ProviderConfigurationStatus = {
+  provider: string;
+  configured: boolean;
+  validated: boolean;
+  textModel: string;
+  visionModel: string;
+  baseUrl: string;
+};
+
+export type ProviderConfigurationInput = {
+  apiKey: string;
+  textModel: string;
+  visionModel: string;
+  baseUrl: string;
+};
+
+type SettingsViewProps = {
+  status: ProviderConfigurationStatus;
+  saving?: boolean;
+  errorCode?: string | null;
+  onSave: (input: ProviderConfigurationInput) => Promise<void>;
+};
+
+const ZHIPU_MODEL = 'glm-5.3-flash';
+const ZHIPU_STANDARD_BASE_URL = 'https://open.bigmodel.cn/api/paas/v4';
+const ZHIPU_CODING_PLAN_BASE_URL = 'https://open.bigmodel.cn/api/coding/paas/v4';
+
+const PROVIDER_ERROR_MESSAGES: Record<string, string> = {
+  AI_ACCOUNT_ARREARS:
+    '接口返回账户额度不可用（1113）。请确认这里使用的是 Coding Plan 专属 Key，并选择 Coding Plan 通道；标准 API Key 与套餐 Key 不通用。',
+  AI_RATE_LIMIT: '请求过于频繁，请等待一分钟后重试。',
+  AI_PROVIDER_OVERLOADED: '智谱模型当前访问量过大，请稍后重试。',
+  AI_QUOTA_EXCEEDED: '智谱额度已用完，请检查账户额度或等待重置。',
+  AI_PLAN_EXPIRED: '智谱套餐已到期，请续订后重试。',
+  AI_TIMEOUT: '连接等待超时，本次未发送企业或员工材料；请稍后重试。',
+  AI_PROVIDER_NOT_CONFIGURED: '模型配置不完整，请检查 API Key、模型和计费通道。',
+  AI_SCHEMA_INVALID: '连接返回内容未通过结构校验，未作为有效结果采用；可稍后重试。',
+  AI_LOCAL_REDACTION_FAILED: '本地图片识别或脱敏失败，材料未发送。',
+  AI_PROVIDER_ERROR: '智谱连接失败，请检查 API Key 与账户状态。',
+};
+
+export function SettingsView({
+  status,
+  saving = false,
+  errorCode = null,
+  onSave,
+}: SettingsViewProps) {
+  const keyRef = useRef<HTMLInputElement>(null);
+  const [baseUrl, setBaseUrl] = useState(status.baseUrl);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const apiKey = keyRef.current?.value.trim() ?? '';
+    try {
+      await onSave({
+        apiKey,
+        textModel: ZHIPU_MODEL,
+        visionModel: ZHIPU_MODEL,
+        baseUrl,
+      });
+    } finally {
+      if (keyRef.current) keyRef.current.value = '';
+    }
+  }
+
+  return (
+    <section className="settings-view" aria-labelledby="settings-title">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">首次使用设置</p>
+          <h2 id="settings-title">连接智谱 GLM</h2>
+          <p className="muted">
+            API Key 仅保存在本机当前用户的应用私有目录。连接测试不发送企业或员工材料。
+          </p>
+        </div>
+        <span className="status-pill">
+          {status.validated ? '连接已验证' : status.configured ? '等待连接验证' : '尚未配置'}
+        </span>
+      </div>
+
+      {errorCode ? (
+        <p className="settings-error" role="alert">
+          连接失败：{PROVIDER_ERROR_MESSAGES[errorCode] ?? '请稍后重试。'}（{errorCode}）
+        </p>
+      ) : null}
+
+      <form className="settings-form" onSubmit={submit}>
+        <label htmlFor="zhipu-api-key">智谱 API Key</label>
+        <input
+          ref={keyRef}
+          id="zhipu-api-key"
+          name="zhipu-api-key"
+          type="password"
+          autoComplete="off"
+          required={!status.configured}
+          minLength={8}
+          maxLength={4096}
+          placeholder={status.configured ? '留空沿用已保存的 Key，输入新 Key 可替换' : '请输入你自己的智谱 API Key'}
+        />
+
+        <label htmlFor="zhipu-model">分析模型</label>
+        <input
+          id="zhipu-model"
+          value={ZHIPU_MODEL}
+          readOnly
+        />
+
+        <label htmlFor="zhipu-base-url">计费通道</label>
+        <select
+          id="zhipu-base-url"
+          value={baseUrl}
+          onChange={(event) => setBaseUrl(event.target.value)}
+        >
+          <option value={ZHIPU_STANDARD_BASE_URL}>
+            标准 API — {ZHIPU_STANDARD_BASE_URL}
+          </option>
+          <option value={ZHIPU_CODING_PLAN_BASE_URL}>
+            Coding Plan — {ZHIPU_CODING_PLAN_BASE_URL}
+          </option>
+        </select>
+
+        <button type="submit" className="primary-action" disabled={saving}>
+          {saving ? '正在安全保存并测试…' : '保存并测试连接'}
+        </button>
+      </form>
+    </section>
+  );
+}

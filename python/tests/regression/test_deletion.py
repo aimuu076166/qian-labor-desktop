@@ -1,4 +1,6 @@
 from pathlib import Path
+from uuid import uuid4
+import os
 
 import pytest
 from sqlalchemy import func, select
@@ -25,10 +27,12 @@ def test_delete_is_idempotent_and_removes_sensitive_derivatives(tmp_path: Path) 
         analysis = AnalysisBatch(name="虚构待删除")
         session.add(analysis)
         session.flush()
+        file_id = str(uuid4())
         uploaded = UploadedFile(
+            id=file_id,
             analysis_id=analysis.id,
             original_filename="虚构名单.csv",
-            storage_key=f"analyses/{analysis.id}/fictional.csv",
+            storage_key=f"analyses/{analysis.id}/{file_id}.csv",
             mime_type="text/csv",
             extension=".csv",
             size_bytes=10,
@@ -117,9 +121,11 @@ def test_delete_does_not_commit_tombstone_until_file_cleanup_succeeds(
         analysis = AnalysisBatch(name="虚构删除重试")
         session.add(analysis)
         session.flush()
-        storage_key = f"analyses/{analysis.id}/fictional-sensitive.csv"
+        file_id = str(uuid4())
+        storage_key = f"analyses/{analysis.id}/{file_id}.csv"
         session.add(
             UploadedFile(
+                id=file_id,
                 analysis_id=analysis.id,
                 original_filename="虚构敏感材料.csv",
                 storage_key=storage_key,
@@ -133,17 +139,17 @@ def test_delete_does_not_commit_tombstone_until_file_cleanup_succeeds(
         analysis_id = analysis.id
     storage.save_bytes(b"fictional", storage_key)
     raw_path = (storage.root / storage_key).resolve()
-    original_unlink = Path.unlink
+    original_unlink = os.unlink
     failed_once = False
 
-    def fail_once(path: Path, *args, **kwargs):
+    def fail_once(path, *args, **kwargs):
         nonlocal failed_once
-        if path.resolve() == raw_path and not failed_once:
+        if Path(path).name == raw_path.name and not failed_once:
             failed_once = True
             raise OSError("synthetic unlink failure")
         return original_unlink(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "unlink", fail_once)
+    monkeypatch.setattr(os, "unlink", fail_once)
     service = DeletionService(database, str(storage.root))
 
     with pytest.raises(OSError, match="synthetic unlink failure"):

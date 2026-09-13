@@ -1,163 +1,136 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { App } from '../src/App';
+import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 import { selectEmploymentFiles } from '../src/lib/desktop';
+import { companyServer, json, renderCompany, syntheticConfiguration } from './company-fixture';
 
-vi.mock('../src/lib/desktop', () => ({
-  selectEmploymentFiles: vi.fn(),
-}));
+vi.mock('../src/lib/desktop', () => ({ selectEmploymentFiles: vi.fn(), getProviderConfigurationStatus: vi.fn(),
+  configureZhipuProvider: vi.fn(), markZhipuProviderValidated: vi.fn() }));
 
-const mockedSelect = vi.mocked(selectEmploymentFiles);
-
-function renderApp(props: React.ComponentProps<typeof App>) {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  return render(
-    <QueryClientProvider client={client}>
-      <App {...props} />
-    </QueryClientProvider>,
-  );
-}
-
-describe('App', () => {
-  beforeEach(() => mockedSelect.mockReset());
-
-  it('renders the desktop product identity without a web access-code gate', async () => {
-    renderApp({
-      backendLoader: async () => ({ baseUrl: 'http://127.0.0.1:43123', token: 'test-token' }),
-      apiFactory: () => async () => new Response('{}', { status: 200 }),
+describe('desktop production integration', () => {
+  it.each(['设置', '模型设置'].flatMap(entry => ['return', 'save'].map(action => ({ entry, action }))))(
+    'retains detail destination after repeated $entry entry and $action', async ({ entry, action }) => {
+      const server = companyServer({ override: async path => path === '/api/provider/connection-test' ? json({ status: 'connected' }) : undefined });
+      const configure = vi.fn(async () => ({ ...syntheticConfiguration, validated: false }));
+      const validate = vi.fn(async () => syntheticConfiguration);
+      renderCompany(server, { providerConfigurator: configure, providerValidator: validate });
+      fireEvent.click(await screen.findByRole('button', { name: '查看合成员**详情' }));
+      await screen.findByRole('heading', { name: '合成员**' });
+      fireEvent.click(screen.getByRole('button', { name: '设置' }));
+      await screen.findByRole('heading', { name: '连接智谱 GLM' });
+      fireEvent.click(screen.getByRole('button', { name: entry }));
+      if (action === 'save') {
+        fireEvent.change(screen.getByLabelText('智谱 API Key'), { target: { value: 'synthetic-repeat-settings-key' } });
+        fireEvent.click(screen.getByRole('button', { name: '保存并测试连接' }));
+      } else fireEvent.click(screen.getByRole('button', { name: '返回工作区' }));
+      expect(await screen.findByRole('heading', { name: '合成员**' })).toBeInTheDocument();
+      if (action === 'save') { expect(configure).toHaveBeenCalledOnce(); expect(validate).toHaveBeenCalledOnce(); }
     });
+  it.each(['extracting', 'failed'])('does not display raw errors in current %s material state', async status => {
+    const server = companyServer({ status, override: async path => path.endsWith('/processing') ? json({
+      analysis_id: 'current', status: 'failed', progress: 100, current_stage: 'failed',
+      files: [{ error_code: 'private material raw failure' }],
+    }) : undefined });
+    renderCompany(server);
+    await screen.findByText('已建档员工 1 人');
+    fireEvent.click(screen.getByRole('button', { name: '材料' }));
+    expect(await screen.findByRole('cell', { name: 'synthetic-contract.docx' })).toBeInTheDocument();
+    expect(screen.queryByText(/private material raw failure/)).not.toBeInTheDocument();
+  });
+
+  it('renders local setup without a web access-code or provider gate', async () => {
+    const server = companyServer({ exists: false, analysisId: null });
+    renderCompany(server, { configurationLoader: async () => ({ ...syntheticConfiguration, configured: false, validated: false }) });
+    expect(await screen.findByRole('heading', { name: '建立企业本地档案' })).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: '企安用工' })).toBeInTheDocument();
-    expect(screen.getByText('本地优先劳动用工风险体检')).toBeInTheDocument();
-    expect(screen.queryByText('访问码')).not.toBeInTheDocument();
-    expect(await screen.findByRole('button', { name: '选择企业材料' })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/访问码/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('智谱 API Key')).not.toBeInTheDocument();
   });
 
-  it('runs the desktop path from native selection through dashboard, source detail, and deletion', async () => {
-    mockedSelect.mockResolvedValue(['/tmp/fictional-contract.docx']);
-    const request = vi.fn(async (path: string, init: RequestInit = {}) => {
-      const method = init.method ?? 'GET';
-      if (path === '/api/analyses' && method === 'POST') {
-        return new Response(JSON.stringify({ id: 'analysis-one' }), { status: 201 });
-      }
-      if (path === '/api/analyses/analysis-one/import-paths' && method === 'POST') {
-        return new Response(JSON.stringify({ files: [{ id: 'file-one' }] }), { status: 200 });
-      }
-      if (path === '/api/analyses/analysis-one/process' && method === 'POST') {
-        return new Response(JSON.stringify({ status: 'queued', queue_mode: 'desktop' }), {
-          status: 202,
-        });
-      }
-      if (path === '/api/analyses/analysis-one/processing') {
-        return new Response(
-          JSON.stringify({
-            analysis_id: 'analysis-one',
-            status: 'completed',
-            progress: 100,
-            current_stage: 'completed',
-            files: [{ id: 'file-one', filename: 'fictional-contract.docx', status: 'processed' }],
-            jobs: [],
-          }),
-          { status: 200 },
-        );
-      }
-      if (path === '/api/analyses/analysis-one/dashboard') {
-        return new Response(
-          JSON.stringify({
-            summary: {
-              analysis_id: 'analysis-one',
-              status: 'completed',
-              employee_count: 1,
-              finding_count: 2,
-              high_count: 1,
-              medium_count: 0,
-              insufficient_data_count: 1,
-            },
-            findings: [
-              {
-                id: 'finding-one',
-                rule_id: 'CONTRACT_MISSING_ACTIVE',
-                title: '在职员工合同材料缺失',
-                severity: 'high',
-                assessment_status: 'suspected_risk',
-                requires_human_review: true,
-              },
-              {
-                id: 'finding-two',
-                rule_id: 'MATERIAL_COVERAGE_LOW',
-                title: '关键材料覆盖率不足',
-                severity: 'info',
-                assessment_status: 'insufficient_data',
-                requires_human_review: false,
-              },
-            ],
-          }),
-          { status: 200 },
-        );
-      }
-      if (path === '/api/findings/finding-one') {
-        return new Response(
-          JSON.stringify({
-            id: 'finding-one',
-            analysis_id: 'analysis-one',
-            rule_id: 'CONTRACT_MISSING_ACTIVE',
-            title: '在职员工合同材料缺失',
-            severity: 'high',
-            assessment_status: 'suspected_risk',
-            requires_human_review: true,
-            summary: '本次材料中未发现书面劳动合同，请核对。',
-            sources: [
-              {
-                id: 'source-one',
-                file_id: 'file-one',
-                file_name: 'fictional-contract.docx',
-                locator_type: 'paragraph',
-                location: { paragraph: 2 },
-                excerpt: '完全虚构来源摘录',
-              },
-            ],
-          }),
-          { status: 200 },
-        );
-      }
-      if (path === '/api/analyses/analysis-one' && method === 'DELETE') {
-        return new Response(JSON.stringify({ id: 'analysis-one', status: 'deleted' }), {
-          status: 200,
-        });
-      }
-      return new Response('{}', { status: 404 });
-    });
+  it('reopens the selected company on its employee workbench rather than globally latest batch', async () => {
+    const server = companyServer(); renderCompany(server);
+    expect(await screen.findByText('已建档员工 1 人')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: '查看合成员**详情' })).toBeInTheDocument();
+    expect(server.request.mock.calls.some(([path]) => path === '/api/analyses/latest')).toBe(false);
+    expect(server.request.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
+  });
 
-    renderApp({
-      backendLoader: async () => ({ baseUrl: 'http://127.0.0.1:43123', token: 'memory-token' }),
-      apiFactory: () => request,
-    });
+  it('preserves failed materials and permits explicit retry of that same current corpus', async () => {
+    const server = companyServer({ status: 'failed' }); renderCompany(server);
+    await screen.findByText('已建档员工 1 人');
+    fireEvent.click(await screen.findByRole('button', { name: '材料' }));
+    expect(await screen.findByRole('cell', { name: 'synthetic-contract.docx' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '开始分析' }));
+    await waitFor(() => expect(server.request).toHaveBeenCalledWith('/api/analyses/current/task/start', expect.objectContaining({ method: 'POST',
+      body: expect.stringContaining('request_id') })));
+    expect(await screen.findByRole('heading', { name: '企业用工风险概览' })).toBeInTheDocument();
+  });
 
+  it('runs native selection, current import, analysis, canonical detail, report and source trace with current deletion absent', async () => {
+    vi.mocked(selectEmploymentFiles).mockResolvedValue(['/tmp/synthetic-contract.docx']);
+    const server = companyServer({ analysisId: null }); renderCompany(server);
     fireEvent.click(await screen.findByRole('button', { name: '选择企业材料' }));
+    expect(await screen.findByRole('cell', { name: 'synthetic-contract.docx' })).toBeInTheDocument();
+    const create = server.request.mock.calls.find(([path, init]) => path.endsWith('/current-analysis') && init?.method === 'POST');
+    expect(JSON.parse(String(create?.[1]?.body))).toEqual({ id: expect.stringMatching(/^[0-9a-f-]{36}$/), expected_company_version: 0 });
+    fireEvent.click(screen.getByRole('button', { name: '开始分析' }));
     expect(await screen.findByRole('heading', { name: '企业用工风险概览' })).toBeInTheDocument();
-    expect(screen.queryByText('无风险')).not.toBeInTheDocument();
-
-    const findingTitle = screen.getByText('在职员工合同材料缺失');
-    const findingButton = findingTitle.closest('button');
-    expect(findingButton).not.toBeNull();
-    fireEvent.click(findingButton!);
-
-    expect(await screen.findByText('fictional-contract.docx')).toBeInTheDocument();
-    expect(screen.getByText(/第 2 段/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '查看员工台账' }));
+    fireEvent.click(await screen.findByRole('button', { name: '查看合成员**详情' }));
+    expect(await screen.findByRole('heading', { name: '合成员**' })).toBeInTheDocument();
+    expect(server.request.mock.calls.some(([path]) => path.endsWith('/employees/record-one'))).toBe(true);
+    expect(server.request.mock.calls.some(([path]) => path.endsWith('/employees/snapshot-one'))).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /合成合同事项待核查/ }));
+    expect(await screen.findByText('完全虚构来源摘录')).toBeInTheDocument();
+    expect(screen.getByText('第 2 段')).toBeInTheDocument();
     expect(screen.getByText('需要人工复核')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /返回员工详情/ }));
+    expect(await screen.findByRole('heading', { name: '合成员**' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '报告' }));
+    fireEvent.click(await screen.findByRole('button', { name: '查看当前报告草稿' }));
+    expect(await screen.findByRole('heading', { name: '企业用工风险体检报告' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '删除本次分析' })).not.toBeInTheDocument();
+    expect(server.request.mock.calls.some(([, init]) => init?.method === 'DELETE')).toBe(false);
+  });
 
-    fireEvent.click(screen.getByRole('button', { name: /返回风险概览/ }));
+  it('exposes pending matching, explicitly binds a stable employee and then refreshes results', async () => {
+    const server = companyServer({ status: 'matching_review' }); renderCompany(server);
+    fireEvent.click(await screen.findByRole('button', { name: '确认员工匹配' }));
+    expect(await screen.findByRole('heading', { name: '请先确认员工匹配' })).toBeInTheDocument();
+    expect(screen.queryByText('分析完成')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '确认归属' })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('归属员工'), { target: { value: 'record-one' } });
+    fireEvent.click(screen.getByRole('button', { name: '确认归属' }));
     expect(await screen.findByRole('heading', { name: '企业用工风险概览' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '删除本次分析' }));
+    expect(server.request).toHaveBeenCalledWith('/api/analyses/current/matching-decisions', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ candidate_id: 'candidate', decision: 'create_unknown',
+        employee_record_id: 'record-one', expected_record_version: 0, display_name: '合成员**', fact_ids: ['fact'] }),
+    }));
+  });
 
+  it('validates write-only GLM configuration only after explicit save and returns to context', async () => {
+    const server = companyServer({ override: async path => path === '/api/provider/connection-test' ? json({ status: 'connected' }) : undefined });
+    const configure = vi.fn(async () => ({ ...syntheticConfiguration, validated: false }));
+    const validate = vi.fn(async () => syntheticConfiguration);
+    renderCompany(server, { configurationLoader: async () => ({ ...syntheticConfiguration, configured: false, validated: false }),
+      providerConfigurator: configure, providerValidator: validate });
+    await screen.findByText('已建档员工 1 人');
+    fireEvent.click(screen.getByRole('button', { name: '模型设置' }));
+    fireEvent.change(await screen.findByLabelText('智谱 API Key'), { target: { value: 'synthetic-ui-key-value' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存并测试连接' }));
     expect(await screen.findByRole('button', { name: '选择企业材料' })).toBeInTheDocument();
-    await waitFor(() =>
-      expect(request).toHaveBeenCalledWith(
-        '/api/analyses/analysis-one',
-        expect.objectContaining({ method: 'DELETE' }),
-      ),
-    );
+    expect(configure).toHaveBeenCalledOnce(); expect(validate).toHaveBeenCalledOnce();
+    expect(server.request).toHaveBeenCalledWith('/api/provider/connection-test', { method: 'POST' });
+    expect(screen.queryByDisplayValue('synthetic-ui-key-value')).not.toBeInTheDocument();
+  });
+
+  it('shows stable provider connection failure without exposing the key', async () => {
+    const server = companyServer({ override: async path => path === '/api/provider/connection-test'
+      ? json({ detail: { code: 'AI_PROVIDER_ERROR' } }, 502) : undefined });
+    renderCompany(server, { providerConfigurator: async () => ({ ...syntheticConfiguration, validated: false }) });
+    fireEvent.click(await screen.findByRole('button', { name: '模型设置' }));
+    fireEvent.change(await screen.findByLabelText('智谱 API Key'), { target: { value: 'synthetic-ui-key-value' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存并测试连接' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('AI_PROVIDER_ERROR');
+    expect(screen.queryByRole('button', { name: '选择企业材料' })).not.toBeInTheDocument();
   });
 });

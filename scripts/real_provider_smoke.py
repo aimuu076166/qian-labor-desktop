@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -14,6 +15,11 @@ def _not_run(reason: str) -> int:
     print("REAL_PROVIDER_SMOKE=NOT_RUN")
     print(f"REASON={reason}")
     return 0
+
+
+def _safe_failure_code(error: Exception) -> str:
+    value = str(error)
+    return value if re.fullmatch(r"[A-Z][A-Z0-9_]{2,79}", value) else type(error).__name__
 
 
 def _valid_identity(serial: str = "951") -> str:
@@ -64,11 +70,8 @@ def _write_synthetic_csv(path: Path) -> None:
         )
 
 
-def _count_sourced_facts(facts: list[object]) -> int:
-    return sum(
-        bool(getattr(fact, "source_locator_ids", None))
-        for fact in facts
-    )
+def _count_sourced_facts(fact_ids: list[str | None]) -> int:
+    return len({fact_id for fact_id in fact_ids if fact_id})
 
 
 def main() -> int:
@@ -89,7 +92,12 @@ def main() -> int:
 
     from qian_labor.ai.fact_contract import CANONICAL_FACT_TYPE_SET
     from qian_labor.desktop.app import create_desktop_app
-    from qian_labor.models.core import AIUsageRecord, EmploymentFact, RiskFinding
+    from qian_labor.models.core import (
+        AIUsageRecord,
+        EmploymentFact,
+        RiskFinding,
+        SourceLocator,
+    )
     from qian_labor.rules.catalog import RULE_IDS
     from qian_labor.security.local_redaction import valid_external_pepper
     from qian_labor.settings import Settings
@@ -204,8 +212,16 @@ def main() -> int:
                             )
                         )
                     )
+                    source_fact_ids = list(
+                        session.scalars(
+                            select(SourceLocator.fact_id).where(
+                                SourceLocator.analysis_id == analysis_id,
+                                SourceLocator.fact_id.is_not(None),
+                            )
+                        )
+                    )
 
-                source_count = _count_sourced_facts(facts)
+                source_count = _count_sourced_facts(source_fact_ids)
                 if not facts:
                     raise RuntimeError("STRUCTURED_FACTS_MISSING")
                 if not usages or len(usages) > max_calls:
@@ -240,7 +256,7 @@ def main() -> int:
             print(marker)
         return 0
     except Exception as error:
-        print(f"REAL_PROVIDER_SMOKE=FAIL:{type(error).__name__}", file=sys.stderr)
+        print(f"REAL_PROVIDER_SMOKE=FAIL:{_safe_failure_code(error)}", file=sys.stderr)
         return 1
 
 

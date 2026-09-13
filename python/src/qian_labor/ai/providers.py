@@ -4,6 +4,7 @@ import json
 import mimetypes
 import re
 import time
+from dataclasses import asdict, dataclass
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -21,6 +22,7 @@ from qian_labor.ai.schemas import (
     UsageRecord,
 )
 from qian_labor.security.local_redaction import (
+    PreparedProviderContent,
     PrivacyBoundary,
     PrivacyBoundaryError,
     valid_external_pepper,
@@ -29,6 +31,95 @@ from qian_labor.security.local_redaction import (
 
 class AIProviderError(RuntimeError):
     """Safe provider error that never includes source text or credentials."""
+
+    def __init__(self, code: str, diagnostic: "AIDiagnostic | None" = None, *, usage: UsageRecord | None = None) -> None:
+        # Keep the stable public error code as the exception string. The
+        # bounded diagnostic is separate so callers cannot accidentally expose
+        # provider response text or validation context.
+        super().__init__(code)
+        self.code = code
+        self.diagnostic = diagnostic or AIDiagnostic(category="provider")
+        self.usage = usage
+
+
+DiagnosticCategory = Literal[
+    "configuration",
+    "privacy",
+    "budget",
+    "limit",
+    "http",
+    "transport",
+    "timeout",
+    "response",
+    "json",
+    "schema",
+    "semantic",
+    "incomplete",
+    "provider",
+]
+
+
+@dataclass(frozen=True)
+class AIDiagnostic:
+    """Safe, bounded provider diagnostics; never contains request/response text."""
+
+    category: DiagnosticCategory
+    status_code: int | None = None
+    finish_reason: Literal["stop", "length", "content_filter", "tool_calls"] | None = None
+    elapsed_ms: int | None = None
+    attempt: int | None = None
+    input_length: int | None = None
+    output_length: int | None = None
+    json_error_position: int | None = None
+    # Set only after canonical fact/type validation; never copy arbitrary model
+    # strings, values or excerpts here. fact_index is zero-based.
+    fact_index: int | None = None
+    fact_type: str | None = None
+    actual_value_type: str | None = None
+    expected_value_types: tuple[str, ...] | None = None
+    json_error_kind: Literal[
+        "missing_comma", "missing_colon", "unterminated_string", "invalid_escape",
+        "control_character", "property_name", "expected_value", "extra_data",
+        "markdown_fence", "other",
+    ] | None = None
+    path: Literal[
+        "response",
+        "choices",
+        "choices[0]",
+        "choices[0].message",
+        "choices[0].message.content",
+        "response_format",
+        "usage",
+        "facts",
+        "facts[].fact_type",
+        "facts[].value_type",
+        "facts[].value_*",
+        "facts[].source",
+        "contract_advisory",
+        "schema_version", "document_type", "employee_name", "employee_number",
+        "department", "job_title", "needs_human_confirmation",
+        "contract_advisory.version", "contract_advisory.status",
+        "contract_advisory.observations", "contract_advisory.observations[].source",
+        "contract_advisory.observations[].issue", "contract_advisory.observations[].checks",
+        "contract_advisory.observations[].next_action",
+        "contract_advisory.observations[].unverified_references",
+    ] | None = None
+    validation_type: Literal[
+        "empty",
+        "not_object",
+        "not_list",
+        "not_string",
+        "invalid_json",
+        "missing_field",
+        "unknown_field",
+        "invalid_type",
+        "invalid_value",
+        "conflict",
+        "unsupported",
+    ] | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {key: value for key, value in asdict(self).items() if value is not None}
 
 
 class AIProvider(Protocol):
@@ -58,8 +149,9 @@ class FakeAIProvider:
                     confidence=1,
                     source=SourceLocator(
                         file_name=filename,
-                        row=2,
-                        excerpt="虚构演示字段",
+                        # The explicit synthetic marker contains this exact key;
+                        # the normal parser boundary supplies its actual location.
+                        excerpt=json.dumps(fact_type, ensure_ascii=False),
                     ),
                 )
                 for fact_type, value in synthetic_facts.items()
@@ -250,26 +342,37 @@ class OpenAIResponsesProvider:
             raise AIProviderError("AI_BUDGET_EXCEEDED")
 
         idempotency_key = str(uuid4())
-        redaction_failed = False
-        try:
-            prepared = self.privacy_boundary.prepare(
-                filename,
-                content,
-                is_image=is_image,
-                external=True,
-            )
-        except PrivacyBoundaryError:
-            redaction_failed = True
-            prepared = None
-        if redaction_failed or prepared is None:
-            raise AIProviderError("AI_LOCAL_REDACTION_FAILED") from None
-        payload = self._request_payload(prepared.filename, prepared.content, model, is_image)
+        source_context = getattr(content, "source_context", None)
+        if isinstance(content, PreparedProviderContent):
+            prepared_filename = filename
+            prepared_content = bytes(content)
+        else:
+            try:
+                prepared = self.privacy_boundary.prepare(
+                    filename,
+                    content,
+                    is_image=is_image,
+                    external=True,
+                )
+            except PrivacyBoundaryError:
+                raise AIProviderError("AI_LOCAL_REDACTION_FAILED") from None
+            prepared_filename = prepared.filename
+            prepared_content = prepared.content
+        payload = self._request_payload(
+            prepared_filename,
+            prepared_content,
+            model,
+            is_image,
+            source_context=source_context,
+        )
         started = time.monotonic()
         response: httpx.Response | None = None
         attempts = 0
         failure_code: str | None = None
 
+        from qian_labor.jobs.control import checkpoint, retry_wait
         for attempts in range(1, self.max_attempts + 1):
+            checkpoint()
             try:
                 response = self.client.post(
                     f"{self.base_url}/responses",
@@ -303,7 +406,7 @@ class OpenAIResponsesProvider:
                         failure_code = "AI_PROVIDER_ERROR"
                     break
                 if self.retry_delay_seconds:
-                    time.sleep(self.retry_delay_seconds * (2 ** (attempts - 1)))
+                    retry_wait(self.retry_delay_seconds * (2 ** (attempts - 1)))
 
         if failure_code is not None:
             raise AIProviderError(failure_code) from None
@@ -381,7 +484,12 @@ class OpenAIResponsesProvider:
 
     @staticmethod
     def _request_payload(
-        filename: str, content: bytes, model: str, is_image: bool
+        filename: str,
+        content: bytes,
+        model: str,
+        is_image: bool,
+        *,
+        source_context: dict[str, object] | None = None,
     ) -> dict[str, object]:
         prompt = (
             "Extract structured employment facts from the provided employment document. "
@@ -389,6 +497,13 @@ class OpenAIResponsesProvider:
             "Return null when a field cannot be reliably determined. "
             "Preserve source locations. "
             f"Filename: {filename}"
+            + (
+                "\nParser-owned context and local OCR blocks follow. "
+                "Copy citation_id values exactly when citing them; never invent one.\n"
+                + json.dumps(source_context, ensure_ascii=False, separators=(",", ":"))
+                if source_context
+                else ""
+            )
         )
         input_content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
         if is_image:

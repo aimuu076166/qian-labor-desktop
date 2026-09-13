@@ -1,4 +1,5 @@
 import io
+import subprocess
 
 import pytest
 from PIL import Image
@@ -8,6 +9,7 @@ from qian_labor.security.local_redaction import (
     OCRToken,
     PrivacyBoundary,
     PrivacyBoundaryError,
+    TesseractOCR,
 )
 from qian_labor.security.masking import (
     extract_identifier_hashes,
@@ -36,6 +38,107 @@ def _white_png() -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (160, 80), "white").save(output, format="PNG")
     return output.getvalue()
+
+
+def _synthetic_tesseract_tsv(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Real Tesseract TSV includes hierarchy rows with empty text before word rows.
+    output = (
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+        "1\t1\t0\t0\t0\t0\t0\t0\t160\t80\t-1\t\n"
+        "5\t1\t1\t1\t1\t1\t20\t10\t100\t24\t96.5\t13912345678\n"
+        "5\t1\t1\t1\t2\t1\t20\t50\t80\t15\t95\t虚构,SYNTHETIC\n"
+    ).encode()
+
+    def run(command, *, input, capture_output, timeout, check):
+        assert command == ["tesseract", "stdin", "stdout", "-l", "chi_sim+eng", "tsv"]
+        assert input == _white_png()
+        assert capture_output and timeout == 30 and check is False
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr=b"")
+
+    monkeypatch.setattr("qian_labor.security.local_redaction.subprocess.run", run)
+
+
+def test_tesseract_reads_tab_separated_words_and_original_coordinates(monkeypatch):
+    _synthetic_tesseract_tsv(monkeypatch)
+
+    assert TesseractOCR().extract_tokens(_white_png()) == [
+        OCRToken("13912345678", 20, 10, 100, 24, "1-1-1-1"),
+        OCRToken("虚构,SYNTHETIC", 20, 50, 80, 15, "1-1-1-2"),
+    ]
+
+
+def test_real_tsv_adapter_keeps_image_bytes_intact_for_external_preparation(monkeypatch):
+    """图片不再本地打码：原图直达通道，仅保留本地标识哈希供员工匹配。"""
+    _synthetic_tesseract_tsv(monkeypatch)
+    original = _white_png()
+
+    prepared = PrivacyBoundary("synthetic-test-pepper").prepare(
+        "synthetic-scan.png", original, is_image=True, external=True
+    )
+
+    assert prepared.identifier_hashes["phone_hash"] == identifier_hash(
+        "phone", "13912345678", "synthetic-test-pepper"
+    )
+    assert bytes(prepared.content) == original
+
+
+def _tesseract_quote_then_phone(monkeypatch, quote_token: str) -> None:
+    # Tesseract writes word text literally, not using CSV quote escaping.
+    output = (
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n"
+        f"5\t1\t1\t1\t1\t1\t5\t5\t5\t8\t96\t{quote_token}\n"
+        "5\t1\t1\t1\t1\t2\t30\t30\t100\t24\t96\t13912345678\n"
+    ).encode()
+    monkeypatch.setattr(
+        "qian_labor.security.local_redaction.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=output, stderr=b""),
+    )
+
+
+@pytest.mark.parametrize("quote_token", ['"', '虚构"词', '"虚构"'])
+def test_tesseract_literal_quotes_keep_following_word_and_its_box(monkeypatch, quote_token):
+    _tesseract_quote_then_phone(monkeypatch, quote_token)
+
+    assert TesseractOCR().extract_tokens(_white_png()) == [
+        OCRToken(quote_token, 5, 5, 5, 8, "1-1-1-1"),
+        OCRToken("13912345678", 30, 30, 100, 24, "1-1-1-1"),
+    ]
+
+
+def test_standalone_quote_keeps_image_bytes_and_phone_hash(monkeypatch):
+    _tesseract_quote_then_phone(monkeypatch, '"')
+
+    original = _white_png()
+    prepared = PrivacyBoundary("synthetic-test-pepper").prepare(
+        "synthetic-quote-scan.png", original, is_image=True, external=True
+    )
+
+    assert bytes(prepared.content) == original
+    assert prepared.identifier_hashes["phone_hash"] == identifier_hash(
+        "phone", "13912345678", "synthetic-test-pepper"
+    )
+
+
+@pytest.mark.parametrize("output", [
+    b"level\ttext\n1\t\n",  # No recognized words.
+    b"invalid-header\ninvalid-row\n",  # No TSV text column.
+    b"text\tleft\nSYNTHETIC\tinvalid-coordinate\n",
+    b"text\tleft\nSYNTHETIC\t20\n",  # Missing remaining coordinates.
+    b"\xff",  # Not UTF-8.
+])
+def test_damaged_tesseract_output_still_yields_ocr_tokens_without_blocking(monkeypatch, output):
+    """图片不再依赖 OCR 成败：解析失败仅意味着无本地哈希，不阻断分析。"""
+    monkeypatch.setattr(
+        "qian_labor.security.local_redaction.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=output, stderr=b""),
+    )
+
+    original = _white_png()
+    prepared = PrivacyBoundary("synthetic-test-pepper").prepare(
+        "synthetic-scan.png", original, is_image=True, external=True
+    )
+    assert bytes(prepared.content) == original
+    assert prepared.identifier_hashes == {}
 
 
 def _valid_identity(serial: str = "123") -> str:

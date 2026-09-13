@@ -39,6 +39,7 @@ def test_import_rejects_unsupported_explicit_path_without_modifying_source(tmp_p
 
     service = DesktopImportService(database, tmp_path / "app-data")
 
-    with pytest.raises(ValueError):
-        service.import_paths(analysis.id, [source])
+    result = service.import_paths(analysis.id, [source])
+    assert result == []
+    assert result.results[0]["error_code"] == "DESKTOP_IMPORT_FORMAT_UNSUPPORTED"
     assert source.read_bytes() == original

@@ -32,6 +32,21 @@ def target_triple() -> str:
     return value
 
 
+def build_macos_ocr(temporary_root: Path, triple: str) -> Path:
+    architecture = {"aarch64-apple-darwin": "arm64", "x86_64-apple-darwin": "x86_64"}.get(triple)
+    if architecture is None:
+        raise RuntimeError("MACOS_OCR_TARGET_UNSUPPORTED")
+    helper = temporary_root / "qian-macos-ocr"
+    subprocess.run([
+        "xcrun", "swiftc", "-O", "-target", f"{architecture}-apple-macos11.0",
+        "-module-cache-path", str(temporary_root / "swift-module-cache"),
+        str(PYTHON_ROOT / "native" / "macos_ocr.swift"), "-o", str(helper),
+    ], cwd=ROOT, check=True)
+    if not helper.is_file():
+        raise RuntimeError("MACOS_OCR_BUILD_OUTPUT_MISSING")
+    return helper
+
+
 def build() -> Path:
     write_windows_ico(ICON_SOURCE, WINDOWS_ICON)
     triple = target_triple()
@@ -51,6 +66,8 @@ def build() -> Path:
             "--noconfirm",
             "--clean",
             "--onefile",
+            "--collect-data",
+            "qian_labor",
             "--name",
             "qian-sidecar",
             "--paths",
@@ -63,6 +80,9 @@ def build() -> Path:
             str(spec),
             str(ENTRYPOINT),
         ]
+        if triple.endswith("-apple-darwin"):
+            helper = build_macos_ocr(temporary_root, triple)
+            command[-1:-1] = ["--add-binary", f"{helper}:."]
         subprocess.run(command, cwd=ROOT, check=True)
         built = dist / f"qian-sidecar{executable_suffix}"
         if not built.is_file():

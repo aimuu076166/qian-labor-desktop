@@ -8,6 +8,8 @@ from qian_labor.database import Database
 from qian_labor.models.core import AnalysisBatch, UploadedFile
 from qian_labor.security.uploads import UploadPolicy, validate_upload
 from qian_labor.storage.local import LocalStorage
+from qian_labor.services.company_workspaces import require_material_mutation
+from qian_labor.security.filenames import display_filename, validate_filename
 
 
 @dataclass(frozen=True)
@@ -33,9 +35,11 @@ class UploadService:
         self.policy = policy or UploadPolicy()
 
     def add(self, analysis_id: str, filename: str, mime: str, content: bytes) -> UploadResult:
+        validate_filename(filename)
         digest = validate_upload(filename, mime, content, self.policy.max_bytes)
         extension = Path(filename).suffix.lower()
         with self.database.session() as session:
+            require_material_mutation(session, analysis_id)
             analysis = session.get(AnalysisBatch, analysis_id)
             if analysis is None:
                 raise KeyError(analysis_id)
@@ -49,10 +53,6 @@ class UploadService:
                 .select_from(UploadedFile)
                 .where(UploadedFile.analysis_id == analysis_id)
             )
-            if int(current_bytes or 0) + len(content) > self.policy.max_batch_bytes:
-                raise ValueError("BATCH_SIZE_LIMIT")
-            if int(current_files or 0) >= self.policy.max_files:
-                raise ValueError("BATCH_FILE_LIMIT")
             existing = session.scalar(
                 select(UploadedFile).where(
                     UploadedFile.analysis_id == analysis_id,
@@ -62,7 +62,7 @@ class UploadService:
             if existing:
                 return UploadResult(
                     id=existing.id,
-                    original_filename=filename,
+                    original_filename=display_filename(existing.original_filename),
                     size_bytes=len(content),
                     mime_type=mime,
                     sha256=digest,
@@ -71,13 +71,19 @@ class UploadService:
                     detected_kind=existing.detected_kind,
                     progress=existing.progress,
                 )
+            # A duplicate adds neither a file nor bytes; explicit retries remain safe
+            # even when earlier successful imports have reached the batch limits.
+            if int(current_bytes or 0) + len(content) > self.policy.max_batch_bytes:
+                raise ValueError("BATCH_SIZE_LIMIT")
+            if int(current_files or 0) >= self.policy.max_files:
+                raise ValueError("BATCH_FILE_LIMIT")
             file_id = str(uuid4())
             storage_key = f"analyses/{analysis_id}/{file_id}{extension}"
             self.storage.save_bytes(content, storage_key)
             item = UploadedFile(
                 id=file_id,
                 analysis_id=analysis_id,
-                original_filename=filename,
+                original_filename=display_filename(filename),
                 storage_key=storage_key,
                 mime_type=mime,
                 extension=extension,

@@ -1,20 +1,34 @@
 from __future__ import annotations
+from dataclasses import replace
+from collections import Counter
+
+from qian_labor.security.filenames import display_filename
 
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from qian_labor.jobs.control import ProcessingStopped, adapter_call, checkpoint, commit_boundary
 
 from sqlalchemy import func, select
 
 from qian_labor.ai.providers import (
     AIProvider,
+    AIDiagnostic,
     AIProviderError,
     FakeAIProvider,
-    OpenAIResponsesProvider,
 )
-from qian_labor.ai.schemas import ExtractionResult
+from qian_labor.ai.schemas import ExtractionResult, SourceLocator, UsageRecord
+from qian_labor.ai.grounding import (
+    EXTRACTION_VERSION,
+    MAX_TEXT_CHARACTERS,
+    PROOF_KEY,
+    ExtractionInput,
+    deterministic_citation_id,
+    ground_result,
+)
 from qian_labor.database import Database, create_database
 from qian_labor.matching.scoring import score_candidate
 from qian_labor.matching.types import CandidateIdentity
@@ -26,6 +40,8 @@ from qian_labor.models.core import (
     EmploymentFact,
     ProcessingJob,
     UploadedFile,
+    CompanyAnalysisBinding, EmployeeSnapshotBinding,
+    AuditEvent,
 )
 from qian_labor.models.core import (
     ParsedBlock as ParsedBlockModel,
@@ -36,38 +52,37 @@ from qian_labor.models.core import (
 from qian_labor.models.core import (
     SourceLocator as SourceLocatorModel,
 )
-from qian_labor.parsers.protocols import ParsedDocument
+from qian_labor.parsers.protocols import ParsedDocument, ParsedBlock
 from qian_labor.parsers.registry import ParserRegistry
 from qian_labor.security.local_redaction import (
     IdentifierEvidence,
+    ParserTextContent,
+    PreparedProviderContent,
     PreparedProviderInput,
     PrivacyBoundary,
-    valid_external_pepper,
+    PrivacyBoundaryError,
 )
 from qian_labor.security.masking import mask_identity, mask_sensitive
 from qian_labor.services.risk_evaluation import RiskEvaluationService
+from qian_labor.services.company_workspaces import require_material_mutation
+from qian_labor.services.source_provenance import CITATION_KEY
 from qian_labor.settings import Settings
 from qian_labor.storage.local import LocalStorage
 
 
+# Keep the provider request small enough that the JSON contract and advisory
+# can finish within one response.  The limit applies to serialized parser
+# blocks, not to an arbitrary slice of UTF-8 bytes, so a source block is never
+# silently split or dropped.
+MAX_EXTRACTION_CHUNK_CHARACTERS = 16_000
+
+
 def provider_from_settings(settings: Settings) -> AIProvider:
-    if settings.ai_provider == "fake":
-        return FakeAIProvider()
-    if settings.ai_provider in {"openai", "openai-responses"}:
-        if (
-            not valid_external_pepper(settings.pii_hash_pepper)
-            or settings.pii_hash_pepper == settings.app_secret
-        ):
-            raise AIProviderError("AI_PRIVACY_CONFIG_INVALID")
-        return OpenAIResponsesProvider(
-            settings.ai_api_key,
-            settings.ai_base_url,
-            settings.ai_text_model,
-            settings.ai_vision_model,
-            batch_budget_usd=settings.ai_batch_budget_usd,
-            privacy_boundary=PrivacyBoundary(settings.pii_hash_pepper),
-        )
-    raise RuntimeError("AI_PROVIDER_UNSUPPORTED")
+    # Keep the legacy sidecar entry point on the same factory as the desktop
+    # app; otherwise a configured Zhipu provider is unsupported when this
+    # module is launched directly.
+    from qian_labor.ai.provider_factory import provider_from_settings as build_provider
+    return build_provider(settings)
 
 
 class ProcessingPipeline:
@@ -90,7 +105,9 @@ class ProcessingPipeline:
         self._estimated_cost_usd = 0.0
 
     def process(self, analysis_id: str) -> dict[str, Any]:
+        checkpoint()
         with self.database.session() as session:
+            require_material_mutation(session, analysis_id)
             analysis = session.get(AnalysisBatch, analysis_id)
             if analysis is None:
                 raise KeyError(analysis_id)
@@ -99,6 +116,7 @@ class ProcessingPipeline:
             analysis.status = "parsing"
             analysis.current_stage = "parsing"
             analysis.progress = 5
+            analysis.failure_reason = None
             files = list(
                 session.scalars(
                     select(UploadedFile)
@@ -109,13 +127,39 @@ class ProcessingPipeline:
             session.commit()
 
         failures = 0
+        incomplete = 0
+        failure_codes: list[str] = []
         for uploaded_file in files:
             try:
-                self._process_file(analysis_id, uploaded_file.id)
+                checkpoint()
+                incomplete += bool(self._process_file(analysis_id, uploaded_file.id))
+            except ProcessingStopped:
+                raise
+            except PrivacyBoundaryError:
+                failures += 1
+                failure_codes.append("AI_LOCAL_REDACTION_FAILED")
+                self._mark_file_failed(uploaded_file.id, "AI_LOCAL_REDACTION_FAILED",
+                                        AIDiagnostic(category="privacy"))
+            except AIProviderError as error:
+                failures += 1
+                error_code = str(error)
+                if not re.fullmatch(r"AI_[A-Z0-9_]+", error_code):
+                    error_code = "PROCESSING_FILE_FAILED"
+                failure_codes.append(error_code)
+                self._mark_file_failed(uploaded_file.id, error_code, error.diagnostic)
+            except ValueError as error:
+                failures += 1
+                error_code = 'SPREADSHEET_DIMENSION_LIMIT' if str(error) == 'SPREADSHEET_DIMENSION_LIMIT' else 'PROCESSING_FILE_FAILED'
+                failure_codes.append(error_code)
+                self._mark_file_failed(uploaded_file.id, error_code,
+                                        AIDiagnostic(category="schema", validation_type="invalid_value"))
             except Exception:
                 failures += 1
-                self._mark_file_failed(uploaded_file.id, "PROCESSING_FILE_FAILED")
+                failure_codes.append("PROCESSING_FILE_FAILED")
+                self._mark_file_failed(uploaded_file.id, "PROCESSING_FILE_FAILED",
+                                        AIDiagnostic(category="provider"))
 
+        checkpoint()
         with self.database.session() as session:
             analysis = session.get(AnalysisBatch, analysis_id)
             if analysis is None:
@@ -131,11 +175,17 @@ class ProcessingPipeline:
                 )
                 or 0
             )
+            all_files_failed = bool(files) and failures == len(files)
             analysis.status = (
-                "partial" if failures else "matching_review" if pending_matches else "evaluating"
+                "failed"
+                if all_files_failed
+                else "matching_review"
+                if pending_matches
+                else "evaluating"
             )
             analysis.current_stage = analysis.status
-            analysis.progress = 100 if failures else 90 if pending_matches else 92
+            analysis.progress = 100 if all_files_failed else 90 if pending_matches else 92
+            analysis.failure_reason = failure_codes[0] if failures else None
             analysis.employee_count = int(
                 session.scalar(
                     select(func.count())
@@ -146,10 +196,11 @@ class ProcessingPipeline:
             )
             session.commit()
             session.refresh(analysis)
-            if failures:
+            if all_files_failed:
                 return self._status_payload(session, analysis)
 
         evaluator = RiskEvaluationService(self.database)
+        checkpoint()
         if pending_matches:
             evaluator.evaluate_data_quality(analysis_id)
         else:
@@ -158,12 +209,15 @@ class ProcessingPipeline:
             analysis = session.get(AnalysisBatch, analysis_id)
             if analysis is None:
                 raise KeyError(analysis_id)
+            if (failures or incomplete) and analysis.status == "completed":
+                analysis.status = "partial"
+                analysis.current_stage = "partial"
             if analysis.status == "completed":
                 analysis.completed_at = datetime.now(UTC)
             session.commit()
             return self._status_payload(session, analysis)
 
-    def _process_file(self, analysis_id: str, file_id: str) -> None:
+    def _process_file(self, analysis_id: str, file_id: str) -> bool:
         with self.database.session() as session:
             uploaded_file = session.get(UploadedFile, file_id)
             if uploaded_file is None:
@@ -171,14 +225,98 @@ class ProcessingPipeline:
             content = self.storage.read_bytes(uploaded_file.storage_key)
 
         parsed = self._parse(analysis_id, file_id, content)
-        self._extract(analysis_id, file_id, content, parsed)
-        with self.database.session() as session:
-            uploaded_file = session.get(UploadedFile, file_id)
-            if uploaded_file:
-                uploaded_file.status = "processed"
+        checkpoint()
+        reused = self._extract(analysis_id, file_id, content, parsed)
+        if reused:
+            # The cache read session has closed before taking the commit guard.
+            # Reuse restores file state, never cached facts/sources/advisory IDs.
+            with commit_boundary(), self.database.session() as session:
+                uploaded_file = session.get(UploadedFile, file_id)
+                uploaded_file.status = "partial" if parsed.warnings else "processed"
+                uploaded_file.error_code = "PROCESSING_INCOMPLETE" if parsed.warnings else None
                 uploaded_file.progress = 100
                 uploaded_file.detected_kind = parsed.kind
                 session.commit()
+            self._refresh_analysis_progress(analysis_id)
+        with self.database.session() as session:
+            return bool(parsed.warnings or self.unreceived_items(session, analysis_id, file_id))
+
+    @classmethod
+    def cached_extraction(cls, session, analysis_id, uploaded_file, provider):
+        key = cls._job_key(analysis_id, uploaded_file.id, "extract", uploaded_file.sha256)
+        job = session.scalar(select(ProcessingJob).where(ProcessingJob.unique_key == key))
+        if job is None or job.status != "succeeded":
+            return False
+        if cls.unreceived_items(session, analysis_id, uploaded_file.id):
+            return False
+        has_facts = session.scalar(select(EmploymentFact.id).where(
+            EmploymentFact.analysis_id == analysis_id, EmploymentFact.file_id == uploaded_file.id).limit(1))
+        from qian_labor.models.core import ContractAdvisoryRun
+        advisory_run = session.scalar(select(ContractAdvisoryRun).where(
+            ContractAdvisoryRun.analysis_id == analysis_id, ContractAdvisoryRun.file_id == uploaded_file.id,
+            ContractAdvisoryRun.input_key == f"{key}:attempt:{job.attempts}"))
+        # A successful provider call is not reusable when its evidence was
+        # deliberately left unlocated by the local grounding pass.  The
+        # material workspace exposes an explicit "开始分析" action for this
+        # case; silently reusing the old rows would make that action a no-op
+        # and prevent a legitimate source-context retry.
+        if uploaded_file.extension.lower() in {".xlsx", ".xls"} and cls.has_unlocated_sources(
+                session, analysis_id, uploaded_file.id):
+            return False
+        upgrade_advisory = bool(getattr(provider, "supports_contract_advisory", False)) and (
+            advisory_run is None or any(status in {"unreadable", "not_executed"} for status in advisory_run.input_statuses))
+        return bool((has_facts or advisory_run) and not upgrade_advisory)
+
+    @staticmethod
+    def unreceived_items(session, analysis_id: str, file_id: str) -> list[dict[str, str]]:
+        """Last committed extraction for this input; failed retries do not erase it."""
+        file = session.get(UploadedFile, file_id)
+        if file is None or file.analysis_id != analysis_id:
+            return []
+        key = ProcessingPipeline._job_key(analysis_id, file_id, "extract", file.sha256)
+        event = session.scalar(select(AuditEvent).where(
+            AuditEvent.analysis_id == analysis_id,
+            AuditEvent.event_type == "extraction_completed",
+            AuditEvent.metadata_json["job_key"].as_string() == key,
+            AuditEvent.metadata_json["file_id"].as_string() == file_id,
+        ).order_by(AuditEvent.metadata_json["attempt"].as_integer().desc(),
+                   AuditEvent.created_at.desc(), AuditEvent.id.desc()).limit(1))
+        return event.metadata_json.get("unreceived", []) if event else []
+
+    @staticmethod
+    def has_unlocated_sources(session, analysis_id: str, file_id: str) -> bool:
+        """Check this successful attempt, not immutable historical failures.
+
+        The completion count is committed with the facts. It controls retry
+        only; historical evidence and human-review gates remain unchanged.
+        Pre-count installations fall back to current-version source proofs.
+        """
+        file = session.get(UploadedFile, file_id)
+        if file is None or file.analysis_id != analysis_id:
+            return False
+        key = ProcessingPipeline._job_key(analysis_id, file_id, "extract", file.sha256)
+        job = session.scalar(select(ProcessingJob).where(ProcessingJob.unique_key == key))
+        if job is not None and job.status == "succeeded":
+            event = session.scalar(select(AuditEvent).where(
+                AuditEvent.analysis_id == analysis_id,
+                AuditEvent.event_type == "extraction_grounding_completed",
+                AuditEvent.metadata_json["job_key"].as_string() == key,
+                AuditEvent.metadata_json["attempt"].as_integer() == job.attempts,
+            ).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc()).limit(1))
+            count = event.metadata_json.get("unlocated_count") if event else None
+            if type(count) is int and count >= 0:
+                return count > 0
+        sources = session.scalars(select(SourceLocatorModel).where(
+            SourceLocatorModel.analysis_id == analysis_id,
+            SourceLocatorModel.file_id == file_id,
+        ))
+        return any(
+            isinstance(source.location, dict)
+            and isinstance(source.location.get(PROOF_KEY), dict)
+            and source.location[PROOF_KEY].get("version") == EXTRACTION_VERSION
+            and source.location[PROOF_KEY].get("status") == "unlocated_needs_review"
+            for source in sources
+        )
 
     def _parse(self, analysis_id: str, file_id: str, content: bytes) -> ParsedDocument:
         with self.database.session() as session:
@@ -200,11 +338,13 @@ class ProcessingPipeline:
                 )
                 session.add(job)
             job.status = "running"
+            job.error_code = None
             job.attempts += 1
             job.started_at = datetime.now(UTC)
             uploaded_file.status = "parsing"
             uploaded_file.progress = 15
             session.commit()
+        self._refresh_analysis_progress(analysis_id)
 
         parsed = self.parsers.parse(uploaded_file.original_filename, content)
         with self.database.session() as session:
@@ -240,7 +380,7 @@ class ProcessingPipeline:
             uploaded_file.detected_kind = parsed.kind
             uploaded_file.page_count = (
                 max(
-                    [page.page for page in parsed.vision_pages]
+                    [page.page for page in parsed.vision_pages if isinstance(page.page, int) and page.page > 0]
                     + [int(block.locator.get("page", 0)) for block in parsed.blocks]
                     + [0]
                 )
@@ -250,19 +390,20 @@ class ProcessingPipeline:
             job.status = "succeeded"
             job.completed_at = datetime.now(UTC)
             session.commit()
+        self._refresh_analysis_progress(analysis_id)
         return parsed
 
     def _extract(
         self, analysis_id: str, file_id: str, content: bytes, parsed: ParsedDocument
-    ) -> None:
+    ) -> bool:
         with self.database.session() as session:
             uploaded_file = session.get(UploadedFile, file_id)
             if uploaded_file is None:
                 raise KeyError(file_id)
             key = self._job_key(analysis_id, file_id, "extract", uploaded_file.sha256)
             job = session.scalar(select(ProcessingJob).where(ProcessingJob.unique_key == key))
-            if job and job.status == "succeeded":
-                return
+            if self.cached_extraction(session, analysis_id, uploaded_file, self.provider):
+                return True
             if job is None:
                 job = ProcessingJob(
                     analysis_id=analysis_id,
@@ -278,6 +419,7 @@ class ProcessingPipeline:
             job.started_at = datetime.now(UTC)
             uploaded_file.status = "extracting"
             uploaded_file.progress = 55
+            uploaded_file.error_code = None
             session.commit()
             original_filename = uploaded_file.original_filename
             job_attempt = job.attempts
@@ -301,8 +443,16 @@ class ProcessingPipeline:
                 )
                 or 0
             )
+            persisted_calls += sum(max(0, event.metadata_json.get("request_attempts", 1) - 1)
+                for event in session.scalars(select(AuditEvent).where(
+                    AuditEvent.analysis_id == analysis_id, AuditEvent.event_type == "ai_usage_completed")))
+        self._refresh_analysis_progress(analysis_id)
 
         inputs = self._extraction_inputs(original_filename, content, parsed)
+        # Check every text input before the first provider call for this file.
+        if any(Path(item.filename).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}
+               and len(item.content.decode("utf-8", errors="replace")) > MAX_TEXT_CHARACTERS for item in inputs):
+            raise AIProviderError("AI_TEXT_LIMIT_EXCEEDED")
         self._provider_calls = max(self._provider_calls, persisted_calls)
         self._estimated_cost_usd = max(self._estimated_cost_usd, persisted_cost)
         if self._provider_calls + len(inputs) > self.max_provider_calls:
@@ -311,49 +461,133 @@ class ProcessingPipeline:
         if isinstance(budget, (int, float)) and self._estimated_cost_usd >= budget:
             raise AIProviderError("AI_BUDGET_EXCEEDED")
         external = bool(getattr(self.provider, "is_external", self.provider.name != "fake"))
-        prepared_inputs = [
-            self.privacy_boundary.prepare(
-                filename,
-                payload,
-                is_image=Path(filename).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"},
+        prepared_inputs = []
+        for input_item in inputs:
+            is_image = Path(input_item.filename).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+            prepared = self.privacy_boundary.prepare(
+                input_item.filename,
+                input_item.content,
+                is_image=is_image,
                 external=external,
             )
-            for filename, payload in inputs
-        ]
-        results: list[tuple[ExtractionResult, PreparedProviderInput]] = []
+            if is_image and external:
+                source_context = self._vision_source_context(input_item, prepared)
+                if source_context:
+                    prepared = replace(
+                        prepared,
+                        content=PreparedProviderContent(
+                            prepared.content,
+                            source_context=source_context,
+                        ),
+                    )
+            prepared_inputs.append(prepared)
+        results: list[tuple[ExtractionResult, PreparedProviderInput, list[dict]]] = []
+        advisory_grounding = []
         for index, item in enumerate(prepared_inputs):
+            if self._provider_calls >= self.max_provider_calls:
+                raise AIProviderError("AI_CALL_LIMIT_EXCEEDED")
+            if hasattr(self.provider, "max_requests_per_extraction"):
+                self.provider.max_requests_per_extraction = self.max_provider_calls - self._provider_calls
             usage_key = hashlib.sha256(f"{key}:usage:{job_attempt}:{index}".encode()).hexdigest()
-            self._begin_usage_record(
-                analysis_id,
-                file_id,
-                usage_key,
-                attempt=job_attempt,
-            )
-            self._provider_calls += 1
-            result = self.provider.extract(item.filename, item.content)
+            with adapter_call(lambda: self._begin_usage_record(
+                    analysis_id, file_id, usage_key, attempt=job_attempt)):
+                self._provider_calls += 1
+                try:
+                    result = self.provider.extract(item.filename, item.content)
+                except (AIProviderError, ProcessingStopped) as error:
+                    known_usage = getattr(error, "usage", None)
+                    if known_usage is not None:
+                        # Cancellation cannot establish the remote outcome;
+                        # keep known counters without claiming it failed there.
+                        self._complete_usage_record(usage_key, known_usage,
+                            status="unknown" if isinstance(error, ProcessingStopped) else "failed")
+                        self._provider_calls += max(0, known_usage.attempts - 1)
+                        self._estimated_cost_usd += known_usage.estimated_cost_usd
+                    raise
+                # Returned usage remains durable even when cancellation discards facts.
+                self._complete_usage_record(usage_key, result.usage)
+                self._provider_calls += max(0, result.usage.attempts - 1)
+            checkpoint()
+            context = inputs[index]
+            if item.ocr_blocks:
+                image_hints: dict[str, Any] = {}
+                for block in context.blocks:
+                    if block.block_type == "image_context":
+                        image_hints.update(block.locator)
+                page_hint = {"page": context.page} if isinstance(context.page, int) and context.page > 0 else {}
+                ocr_blocks = tuple(
+                    ParsedBlock(b.text, b.block_type, {**image_hints, **b.locator, **page_hint})
+                    for b in item.ocr_blocks
+                )
+                image_context = tuple(
+                    block for block in context.blocks if block.block_type == "image_context"
+                )
+                context = ExtractionInput(
+                    context.filename,
+                    context.content,
+                    ocr_blocks + image_context,
+                    context.page,
+                    context.source_file_hash,
+                )
+            grounding = ground_result(result, context, original_filename)
+            from qian_labor.ai.grounding import ground_advisory
+            advisory_grounding.append(ground_advisory(result.contract_advisory, context, original_filename,
+                result.employee_number) if result.contract_advisory else [])
             projected_cost = self._estimated_cost_usd + result.usage.estimated_cost_usd
-            self._complete_usage_record(usage_key, result)
             self._estimated_cost_usd = projected_cost
             if isinstance(budget, (int, float)) and projected_cost > budget:
                 raise AIProviderError("AI_BUDGET_EXCEEDED")
-            results.append((result, item))
+            results.append((result, item, grounding))
 
-        with self.database.session() as session:
+        if not any(result.facts or result.unreceived or result.contract_advisory is not None for result, _, _ in results):
+            raise AIProviderError("AI_NO_SUPPORTED_FACTS")
+
+        unreceived = [entry for result, _, _ in results for entry in result.unreceived]
+        incomplete = bool(parsed.warnings or unreceived)
+
+        with commit_boundary(), self.database.session() as session:
             uploaded_file = session.get(UploadedFile, file_id)
             job = session.scalar(select(ProcessingJob).where(ProcessingJob.unique_key == key))
             if uploaded_file is None or job is None:
                 raise KeyError(file_id)
-            for result, prepared in results:
-                self._persist_result(session, analysis_id, uploaded_file, result, prepared=prepared)
-            document_types = [result.document_type for result, _ in results]
+            assignments = []
+            selected_sources = []
+            for result, prepared, grounding in results:
+                assignments.append(self._persist_result(session, analysis_id, uploaded_file, result, prepared=prepared, grounding=grounding,
+                                                       selected_sources=selected_sources))
+            from qian_labor.services.contract_advisory import persist_run
+            persist_run(session, analysis_id, uploaded_file, f"{key}:attempt:{job_attempt}", results, advisory_grounding, assignments,
+                        has_warnings=incomplete)
+            document_types = [result.document_type for result, _, _ in results]
             uploaded_file.classified_kind = next(
                 (kind for kind in document_types if kind != "other"),
                 document_types[0] if document_types else "other",
             )
-            uploaded_file.progress = 90
+            uploaded_file.status = "partial" if incomplete else "processed"
+            uploaded_file.error_code = "PROCESSING_INCOMPLETE" if incomplete else None
+            uploaded_file.progress = 100
+            uploaded_file.detected_kind = parsed.kind
             job.status = "succeeded"
             job.completed_at = datetime.now(UTC)
+            session.add(AuditEvent(analysis_id=analysis_id, event_type="extraction_completed", metadata_json={
+                "file_id": file_id, "job_key": key, "attempt": job_attempt,
+                "unreceived_count": len(unreceived), "unreceived": unreceived,
+            }))
+            if uploaded_file.extension.lower() in {".xlsx", ".xls"}:
+                session.add(AuditEvent(analysis_id=analysis_id,
+                    event_type="extraction_grounding_completed", metadata_json={
+                        "file_id": file_id, "job_key": key, "attempt": job_attempt,
+                        "source_ids": sorted({source.id for source in selected_sources}),
+                        "unlocated_count": sum(proof.get("status") == "unlocated_needs_review"
+                            for _, _, proofs in results for proof in proofs),
+                        "failure_counts": dict(Counter(proof['diagnostic']['reason']
+                            for _, _, proofs in results for proof in proofs if 'diagnostic' in proof)),
+                        "first_failure": next((proof['diagnostic']
+                            for _, _, proofs in results for proof in proofs if 'diagnostic' in proof), None),
+                    }))
             session.commit()
+        self._refresh_analysis_progress(analysis_id)
+        return False
 
     def _begin_usage_record(
         self,
@@ -382,51 +616,272 @@ class ProcessingPipeline:
             )
             session.commit()
 
-    def _complete_usage_record(self, idempotency_key: str, result: ExtractionResult) -> None:
+    def _complete_usage_record(self, idempotency_key: str, result: UsageRecord, *, status: str = "succeeded") -> None:
         with self.database.session() as session:
             usage = session.scalar(
                 select(AIUsageRecord).where(AIUsageRecord.idempotency_key == idempotency_key)
             )
             if usage is None:
                 raise RuntimeError("AI_USAGE_RECORD_MISSING")
-            usage.input_units = result.usage.input_tokens
-            usage.output_units = result.usage.output_tokens
-            usage.estimated_cost_usd = result.usage.estimated_cost_usd
-            usage.latency_ms = result.usage.latency_ms
-            usage.status = "succeeded"
+            if usage.status != "running":
+                return
+            usage.input_units = result.input_tokens
+            usage.output_units = result.output_tokens
+            usage.estimated_cost_usd = result.estimated_cost_usd
+            usage.latency_ms = result.latency_ms
+            usage.status = status
+            session.add(AuditEvent(analysis_id=usage.analysis_id, event_type="ai_usage_completed", metadata_json={
+                "file_id": usage.file_id, "usage_id": usage.id, "request_attempts": max(1, result.attempts),
+            }))
             session.commit()
 
     @staticmethod
     def _extraction_inputs(
         original_filename: str, content: bytes, parsed: ParsedDocument
-    ) -> list[tuple[str, bytes]]:
+    ) -> list[ExtractionInput]:
+        source_file_hash = hashlib.sha256(content).hexdigest()
         if parsed.kind == "image":
-            return [(original_filename, content)]
+            return [ExtractionInput(original_filename, content, page=1,
+                                    source_file_hash=source_file_hash)]
 
-        inputs: list[tuple[str, bytes]] = []
-        blocks_by_page: dict[int, list[str]] = {}
-        document_blocks: list[str] = []
+        inputs: list[ExtractionInput] = []
+        blocks_by_page: dict[int, list] = {}
+        document_blocks: list = []
         for block in parsed.blocks:
             page = block.locator.get("page")
             if isinstance(page, int) and page > 0:
-                blocks_by_page.setdefault(page, []).append(block.text)
+                blocks_by_page.setdefault(page, []).append(block)
             else:
-                document_blocks.append(block.text)
+                document_blocks.append(block)
+
+        def payload(blocks):
+            row_groups: dict[tuple[object, object, object], list[ParsedBlock]] = {}
+            for block in blocks:
+                locator = block.locator
+                if (
+                    block.block_type != "header"
+                    and block.text.strip()
+                    and isinstance(locator.get("row"), int)
+                    and "column" in locator
+                ):
+                    row_key = (locator.get("sheet"), locator.get("table"), locator["row"])
+                    row_groups.setdefault(row_key, []).append(block)
+            emitted_rows: set[tuple[object, object, object]] = set()
+            lines = []
+            citation_spans, offset = [], 0
+            for block in blocks:
+                locator = dict(block.locator)
+                citation_line = ""
+                row_context_line = ""
+                if block.block_type != "header" and block.text.strip():
+                    row_key = (locator.get("sheet"), locator.get("table"), locator.get("row"))
+                    if row_key in row_groups and row_key not in emitted_rows:
+                        row_blocks = row_groups[row_key]
+                        row_locator = {"row": locator["row"]}
+                        if locator.get("sheet") is not None:
+                            row_locator["sheet"] = locator["sheet"]
+                        if locator.get("table") is not None:
+                            row_locator["table"] = locator["table"]
+                        row_text = " | ".join(row_block.text for row_block in row_blocks)
+                        row_citation_id = deterministic_citation_id(
+                            source_file_hash,
+                            row_locator,
+                            mask_sensitive(row_text),
+                        )
+                        row_context_line = (
+                            f"[row_context {json.dumps({**row_locator, 'citation_id': row_citation_id, 'excerpt': row_text}, ensure_ascii=False)}]\n"
+                        )
+                        emitted_rows.add(row_key)
+                    citation_id = deterministic_citation_id(
+                        source_file_hash,
+                        locator,
+                        mask_sensitive(block.text),
+                    )
+                    citation_line = f"\n[citation_id {citation_id}]"
+                source_line = f"[source {json.dumps(locator, ensure_ascii=False)}]"
+                if row_context_line:
+                    left = offset + row_context_line.index(row_citation_id)
+                    citation_spans.append((left, left + len(row_citation_id)))
+                if citation_line:
+                    left = offset + len(row_context_line) + len(source_line) + len('\n[citation_id ')
+                    citation_spans.append((left, left + len(citation_id)))
+                line = f"{row_context_line}{source_line}{citation_line}\n{block.text}"
+                lines.append(line)
+                offset += len(line) + 1
+            return ParserTextContent("\n".join(lines).encode(), tuple(citation_spans))
+
+        def atomic_units(blocks: list[ParsedBlock]) -> list[tuple[ParsedBlock, ...]]:
+            """Keep table/spreadsheet rows together before applying the budget.
+
+            Parser blocks are often individual cells.  Splitting at that level
+            can separate an employee identifier from the date or value that
+            proves it belongs to the same employee.  A row key is deliberately
+            scoped by sheet and table so equal row numbers in different source
+            regions cannot be merged.
+            """
+            units: list[list[ParsedBlock]] = []
+            row_units: dict[tuple[object, object, object], int] = {}
+            for block in blocks:
+                locator = block.locator
+                row = locator.get("row")
+                is_row_block = block.block_type != "header" and isinstance(row, int) and (
+                    "sheet" in locator or "table" in locator
+                )
+                if not is_row_block:
+                    units.append([block])
+                    continue
+                key = (locator.get("sheet"), locator.get("table"), row)
+                unit_index = row_units.get(key)
+                if unit_index is None:
+                    row_units[key] = len(units)
+                    units.append([block])
+                else:
+                    units[unit_index].append(block)
+            return [tuple(unit) for unit in units]
+
+        def chunk(blocks: list[ParsedBlock]) -> list[tuple[ParsedBlock, ...]]:
+            chunks: list[tuple[ParsedBlock, ...]] = []
+            current: list[ParsedBlock] = []
+            for unit in atomic_units(blocks):
+                single = payload(list(unit))
+                if len(single.decode("utf-8", errors="replace")) > MAX_EXTRACTION_CHUNK_CHARACTERS:
+                    raise AIProviderError("AI_TEXT_LIMIT_EXCEEDED")
+                candidate = payload([*current, *unit])
+                if current and len(candidate.decode("utf-8", errors="replace")) > MAX_EXTRACTION_CHUNK_CHARACTERS:
+                    chunks.append(tuple(current))
+                    current = []
+                current.extend(unit)
+            if current:
+                chunks.append(tuple(current))
+            return chunks
 
         for page, texts in sorted(blocks_by_page.items()):
-            inputs.append((f"{original_filename}-page-{page}.txt", "\n".join(texts).encode()))
+            page_chunks = chunk(texts)
+            for part, blocks in enumerate(page_chunks, start=1):
+                suffix = f"-part-{part}" if len(page_chunks) > 1 else ""
+                inputs.append(ExtractionInput(
+                    f"{original_filename}-page-{page}{suffix}.txt",
+                    payload(list(blocks)),
+                    blocks,
+                    page,
+                    source_file_hash,
+                ))
         if document_blocks:
-            filename = (
-                f"{original_filename}-document.txt"
+            document_chunks = chunk(document_blocks)
+            base = (
+                f"{original_filename}-document"
                 if blocks_by_page or parsed.vision_pages
                 else original_filename
             )
-            inputs.append((filename, "\n".join(document_blocks).encode()))
-        inputs.extend(
-            (f"{original_filename}-page-{page.page}.png", page.image_bytes)
-            for page in parsed.vision_pages
-        )
-        return inputs or [(original_filename, content)]
+            for part, blocks in enumerate(document_chunks, start=1):
+                if len(document_chunks) == 1 and not blocks_by_page and not parsed.vision_pages:
+                    filename = base
+                else:
+                    suffix = f"-part-{part}" if len(document_chunks) > 1 else ""
+                    filename = f"{base}{suffix}.txt"
+                inputs.append(ExtractionInput(filename, payload(list(blocks)), blocks,
+                                              source_file_hash=source_file_hash))
+        for page in parsed.vision_pages:
+            locator = getattr(page, "locator", {}) or {}
+            image_index = locator.get("image")
+            if image_index is not None:
+                filename = f"{original_filename}-image-{image_index}.png"
+            else:
+                filename = f"{original_filename}-page-{page.page}.png"
+            context = (
+                (ParsedBlock("", "image_context", dict(locator)),)
+                if locator
+                else ()
+            )
+            inputs.append(ExtractionInput(filename, page.image_bytes, context, page.page,
+                                          source_file_hash))
+        if not inputs:
+            raise AIProviderError("AI_NO_SUPPORTED_FACTS")
+        return inputs
+
+    @staticmethod
+    def _vision_source_context(
+        item: ExtractionInput, prepared: PreparedProviderInput
+    ) -> dict[str, object]:
+        """Build safe parser/OCR context for a vision request.
+
+        The image bytes are sent separately. This context carries only parser
+        positions, masked OCR text, and IDs that the local grounding pass can
+        recompute against the same image input.
+        """
+        image_hints: dict[str, Any] = {}
+        parser_context = []
+        for block in item.blocks:
+            if block.block_type != "image_context":
+                continue
+            locator = dict(block.locator)
+            image_hints.update(locator)
+            parser_context.append({"locator": locator})
+        page_hint = {"page": item.page} if isinstance(item.page, int) and item.page > 0 else {}
+        if not parser_context and page_hint:
+            parser_context.append({"locator": page_hint})
+
+        ocr_context = []
+        for block in prepared.ocr_blocks:
+            locator = {**image_hints, **block.locator, **page_hint}
+            entry: dict[str, object] = {
+                "locator": locator,
+                "text": mask_sensitive(block.text),
+            }
+            if item.source_file_hash:
+                entry["citation_id"] = deterministic_citation_id(
+                    item.source_file_hash,
+                    locator,
+                    mask_sensitive(block.text),
+                )
+            ocr_context.append(entry)
+
+        if not parser_context and not ocr_context:
+            return {}
+        return {"parser_context": parser_context, "ocr_blocks": ocr_context}
+
+    @staticmethod
+    def _bind_spreadsheet_sources(
+        result: ExtractionResult, parsed: ParsedDocument, filename: str
+    ) -> None:
+        """Use parser-owned row evidence, never a model-invented coordinate/excerpt."""
+        if parsed.kind != "spreadsheet":
+            return
+        rows: dict[tuple[str, int], list[str]] = {}
+        for block in parsed.blocks:
+            row = block.locator.get("row")
+            if block.block_type == "header" or not isinstance(row, int) or not block.text.strip():
+                continue
+            key = (str(block.locator.get("sheet", "")), row)
+            rows.setdefault(key, []).extend(part.strip() for part in block.text.split(" | "))
+
+        for fact in result.facts:
+            identity = fact.employee_id or result.employee_number
+            candidates = [
+                key for key, cells in rows.items() if identity and identity in cells
+            ]
+            if not identity and len(rows) == 1:
+                candidates = list(rows)
+            # An exact, sufficiently long original excerpt can disambiguate rows.
+            excerpt = fact.source.excerpt.strip()
+            if len(candidates) != 1 and len(excerpt) >= 12:
+                matching = [
+                    key for key in (candidates or list(rows))
+                    if excerpt in " | ".join(rows[key])
+                ]
+                if len(matching) == 1:
+                    candidates = matching
+            if len(candidates) == 1:
+                sheet, row = candidates[0]
+                fact.source = SourceLocator(
+                    file_name=filename,
+                    sheet=sheet or None,
+                    row=row,
+                    excerpt=" | ".join(rows[candidates[0]]),
+                )
+            else:
+                fact.source = SourceLocator(file_name=filename)
+                fact.needs_human_confirmation = True
 
     def _persist_result(
         self,
@@ -435,7 +890,11 @@ class ProcessingPipeline:
         uploaded_file: UploadedFile,
         result: ExtractionResult,
         prepared: PreparedProviderInput | None = None,
-    ) -> None:
+        grounding: list[dict] | None = None,
+        selected_sources: list | None = None,
+    ) -> tuple:
+        if not result.facts and result.contract_advisory is None:
+            return None, []
         evidence = prepared.identifier_evidence if prepared else ()
         local_hashes = prepared.identifier_hashes if prepared else {}
         hash_values = self._hash_values(evidence, local_hashes)
@@ -447,6 +906,11 @@ class ProcessingPipeline:
             for value in [result.employee_number, *(fact.employee_id for fact in result.facts)]
             if value
         }
+        # Canonical facts retain their own result identity even when a separate
+        # advisory names another employee. Clause-only inputs can still use the
+        # existing explicit matching flow without fabricating employment facts.
+        if not result.facts and result.contract_advisory:
+            employee_ids.update(o.employee_number for o in result.contract_advisory.observations if o.employee_number)
         employee_number = next(iter(employee_ids)) if len(employee_ids) == 1 else None
         employee = None
         pending_reason = None
@@ -498,6 +962,8 @@ class ProcessingPipeline:
         )
         touched_candidates: list[EmployeeMatchCandidate] = []
         source_scope_key = self._candidate_source_scope_key(result, prepared)
+        workspace_owner = session.get(CompanyAnalysisBinding, analysis_id)
+        is_current = workspace_owner is not None and workspace_owner.role == "current"
 
         if pending_reason:
             if pending_reason != "multiple_employee_ids":
@@ -592,6 +1058,13 @@ class ProcessingPipeline:
             )
         elif number_match is not None:
             employee = number_match[0]
+        elif employee_number and is_current:
+            self._ensure_match_candidate(
+                session, analysis_id, uploaded_file.id, None,
+                extracted_fields=self._evidence_payload(evidence, employee_ids),
+                reason="workspace_identity_confirmation_required", score=0,
+                touched_candidates=touched_candidates, source_scope_key=source_scope_key,
+            )
         elif employee_number:
             display_name = result.employee_name or employee_number
             employee = Employee(
@@ -621,6 +1094,15 @@ class ProcessingPipeline:
                 source_scope_key=source_scope_key,
             )
 
+        if employee is not None and is_current and session.get(EmployeeSnapshotBinding, employee.id) is None:
+            self._ensure_match_candidate(
+                session, analysis_id, uploaded_file.id, employee,
+                extracted_fields=self._evidence_payload(evidence, employee_ids),
+                reason="workspace_identity_confirmation_required", score=0,
+                touched_candidates=touched_candidates, source_scope_key=source_scope_key,
+            )
+            employee = None
+
         identity_status = next(
             (
                 str(fact.value)
@@ -646,11 +1128,22 @@ class ProcessingPipeline:
 
         persisted_fact_ids: list[str] = []
         fact_ids_by_source_employee: dict[str, list[str]] = {}
-        for fact in result.facts:
+        # A confirmed matching decision changes employee ownership, but never the
+        # original extraction identity. Reuse only explicitly scoped prior facts.
+        decided_candidates = list(session.scalars(select(EmployeeMatchCandidate).where(
+            EmployeeMatchCandidate.analysis_id == analysis_id,
+            EmployeeMatchCandidate.file_id == uploaded_file.id,
+            EmployeeMatchCandidate.status.in_({"confirmed", "unmatched"}),
+        )))
+        decided_fact_ids = {fid for candidate in decided_candidates
+                            for fid in (candidate.extracted_fields or {}).get("fact_ids", [])}
+        previous_employee_ids = {"", *(candidate.candidate_employee_id or "" for candidate in decided_candidates)}
+        for fact_index, fact in enumerate(result.facts):
             value_text = json.dumps(fact.value, ensure_ascii=False, sort_keys=True)
             dedupe_key = hashlib.sha256(
                 f"{analysis_id}:{uploaded_file.id}:{employee.id if employee else ''}:"
-                f"{source_scope_key}:{fact.employee_id or ''}:{fact.fact_type}:{value_text}".encode()
+                f"{source_scope_key}:{EXTRACTION_VERSION}:{fact.employee_id or ''}:"
+                f"{fact.fact_type}:{value_text}".encode()
             ).hexdigest()
             existing_fact = session.scalar(
                 select(EmploymentFact).where(
@@ -658,47 +1151,78 @@ class ProcessingPipeline:
                     EmploymentFact.dedupe_key == dedupe_key,
                 )
             )
-            if existing_fact:
-                persisted_fact_ids.append(existing_fact.id)
-                if fact.employee_id:
-                    fact_ids_by_source_employee.setdefault(fact.employee_id, []).append(
-                        existing_fact.id
-                    )
-                continue
-            stored_fact = EmploymentFact(
-                analysis_id=analysis_id,
-                employee_id=employee.id if employee else None,
-                file_id=uploaded_file.id,
-                fact_type=fact.fact_type,
-                value_json=fact.value,
-                normalized_value_json=fact.value,
-                extraction_method=self.provider.name,
-                confidence=fact.confidence,
-                verification_status=(
-                    "needs_human_confirmation"
-                    if fact.needs_human_confirmation or result.needs_human_confirmation
-                    else "unverified"
-                ),
-                dedupe_key=dedupe_key,
-            )
-            session.add(stored_fact)
-            session.flush()
+            if existing_fact is None and decided_fact_ids:
+                previous_keys = {hashlib.sha256(
+                    f"{analysis_id}:{uploaded_file.id}:{previous_employee_id}:"
+                    f"{source_scope_key}:{EXTRACTION_VERSION}:{fact.employee_id or ''}:"
+                    f"{fact.fact_type}:{value_text}".encode()
+                ).hexdigest() for previous_employee_id in previous_employee_ids}
+                existing_fact = session.scalar(select(EmploymentFact).where(
+                    EmploymentFact.analysis_id == analysis_id,
+                    EmploymentFact.file_id == uploaded_file.id,
+                    EmploymentFact.id.in_(decided_fact_ids),
+                    EmploymentFact.dedupe_key.in_(previous_keys),
+                ).order_by(EmploymentFact.created_at, EmploymentFact.id))
+            stored_fact = existing_fact
+            if stored_fact is None:
+                stored_fact = EmploymentFact(
+                    analysis_id=analysis_id,
+                    employee_id=employee.id if employee else None,
+                    file_id=uploaded_file.id,
+                    fact_type=fact.fact_type,
+                    value_json=fact.value,
+                    normalized_value_json=fact.value,
+                    extraction_method=self.provider.name,
+                    confidence=fact.confidence,
+                    verification_status=(
+                        "needs_human_confirmation"
+                        if fact.needs_human_confirmation or result.needs_human_confirmation
+                        else "unverified"
+                    ),
+                    dedupe_key=dedupe_key,
+                )
+                session.add(stored_fact)
+                session.flush()
             persisted_fact_ids.append(stored_fact.id)
-            if fact.employee_id:
-                fact_ids_by_source_employee.setdefault(fact.employee_id, []).append(stored_fact.id)
+            fact_identity = fact.employee_id or result.employee_number
+            if fact_identity:
+                fact_ids_by_source_employee.setdefault(fact_identity, []).append(stored_fact.id)
             location = fact.source.model_dump(exclude={"file_name", "excerpt"}, exclude_none=True)
+            if grounding is not None:
+                location[PROOF_KEY] = grounding[fact_index]
             excerpt = mask_sensitive(fact.source.excerpt)
-            session.add(
-                SourceLocatorModel(
+            # The provider cannot choose this identity.  It is derived only
+            # after local grounding has supplied the real parser position.
+            location[CITATION_KEY] = deterministic_citation_id(
+                uploaded_file.sha256, location, excerpt
+            )
+            locator_type = self._locator_type(location)
+            location_key = json.dumps(location, sort_keys=True, ensure_ascii=False)
+            existing_sources = session.scalars(select(SourceLocatorModel).where(
+                SourceLocatorModel.analysis_id == analysis_id,
+                SourceLocatorModel.file_id == uploaded_file.id,
+                SourceLocatorModel.fact_id == stored_fact.id,
+                SourceLocatorModel.locator_type == locator_type,
+                SourceLocatorModel.excerpt == excerpt,
+            ))
+            existing_source = next((source for source in existing_sources
+                if json.dumps(source.location, sort_keys=True, ensure_ascii=False) == location_key), None)
+            if existing_source is not None:
+                if selected_sources is not None:
+                    selected_sources.append(existing_source)
+                continue
+            stored_source = SourceLocatorModel(
                     analysis_id=analysis_id,
                     file_id=uploaded_file.id,
                     fact_id=stored_fact.id,
-                    locator_type=self._locator_type(location),
+                    locator_type=locator_type,
                     location=location,
                     excerpt=excerpt,
                     content_hash=hashlib.sha256(excerpt.encode()).hexdigest(),
-                )
             )
+            session.add(stored_source)
+            if selected_sources is not None:
+                selected_sources.append(stored_source)
 
         if pending_reason == "multiple_employee_ids":
             for source_employee_id in sorted(employee_ids):
@@ -731,6 +1255,8 @@ class ProcessingPipeline:
                 )
                 pending_candidate.extracted_fields = fields
         self._consolidate_candidate_fact_scopes(session, analysis_id, uploaded_file.id)
+        session.flush()
+        return employee, touched_candidates
 
     @staticmethod
     def _hash_values(
@@ -878,7 +1404,7 @@ class ProcessingPipeline:
         grouped: dict[tuple[str, ...], list[EmployeeMatchCandidate]] = {}
         for candidate in candidates:
             fact_ids = (candidate.extracted_fields or {}).get("fact_ids")
-            if not isinstance(fact_ids, list) or not all(
+            if not isinstance(fact_ids, list) or not fact_ids or not all(
                 isinstance(fact_id, str) for fact_id in fact_ids
             ):
                 continue
@@ -890,7 +1416,8 @@ class ProcessingPipeline:
             for duplicate in alternatives[1:]:
                 session.delete(duplicate)
 
-    def _mark_file_failed(self, file_id: str, error_code: str) -> None:
+    def _mark_file_failed(self, file_id: str, error_code: str,
+                          diagnostic: AIDiagnostic | None = None) -> None:
         with self.database.session() as session:
             uploaded_file = session.get(UploadedFile, file_id)
             if uploaded_file:
@@ -905,14 +1432,58 @@ class ProcessingPipeline:
                     job.status = "failed"
                     job.error_code = error_code
                     job.completed_at = datetime.now(UTC)
+                usages = session.scalars(
+                    select(AIUsageRecord).where(
+                        AIUsageRecord.file_id == file_id,
+                        AIUsageRecord.status == "running",
+                    )
+                )
+                for usage in usages:
+                    usage.status = "failed"
+                session.add(AuditEvent(
+                    analysis_id=uploaded_file.analysis_id,
+                    event_type="processing_failed",
+                    actor="system",
+                    metadata_json={
+                        "file_id": file_id,
+                        "error_code": error_code,
+                        "diagnostic": diagnostic.as_dict() if diagnostic else {},
+                    },
+                ))
                 session.commit()
+            analysis_id = uploaded_file.analysis_id if uploaded_file else None
+        if analysis_id:
+            self._refresh_analysis_progress(analysis_id)
+
+    def _refresh_analysis_progress(self, analysis_id: str) -> None:
+        """Publish durable per-file progress while a batch is still running."""
+        with self.database.session() as session:
+            analysis = session.get(AnalysisBatch, analysis_id)
+            if analysis is None or analysis.status in {
+                "completed", "partial", "failed", "cancelled", "interrupted", "matching_review"
+            }:
+                return
+            files = list(session.scalars(select(UploadedFile).where(UploadedFile.analysis_id == analysis_id)))
+            if not files:
+                return
+            analysis.progress = max(5, min(89, round(sum(file.progress for file in files) / len(files))))
+            if any(file.status == "extracting" for file in files):
+                analysis.current_stage = "extracting"
+            elif any(file.status == "parsing" for file in files):
+                analysis.current_stage = "parsing"
+            elif any(file.status in {"uploaded", "interrupted"} for file in files):
+                analysis.current_stage = "queued"
+            session.commit()
 
     @staticmethod
     def _job_key(analysis_id: str, file_id: str, job_type: str, input_hash: str) -> str:
-        return f"{analysis_id}:{file_id}:{job_type}:{input_hash}"
+        version = f":{EXTRACTION_VERSION}:contract-advisory-v1" if job_type == "extract" else ""
+        return f"{analysis_id}:{file_id}:{job_type}:{input_hash}{version}"
 
     @staticmethod
     def _locator_type(location: dict[str, Any]) -> str:
+        if "table" in location:
+            return "table_cell"
         if "page" in location:
             return "page"
         if "sheet" in location or "row" in location:
@@ -930,6 +1501,16 @@ class ProcessingPipeline:
                 .order_by(UploadedFile.created_at)
             )
         )
+        diagnostics: dict[str, tuple[str | None, dict[str, Any]]] = {}
+        for event in session.scalars(select(AuditEvent).where(
+            AuditEvent.analysis_id == analysis.id,
+            AuditEvent.event_type == "processing_failed",
+        ).order_by(AuditEvent.created_at, AuditEvent.id)):
+            metadata = event.metadata_json if isinstance(event.metadata_json, dict) else {}
+            file_id = metadata.get("file_id")
+            diagnostic = metadata.get("diagnostic")
+            if isinstance(file_id, str) and isinstance(diagnostic, dict):
+                diagnostics[file_id] = (metadata.get("error_code"), diagnostic)
         return {
             "analysis_id": analysis.id,
             "status": analysis.status,
@@ -938,10 +1519,12 @@ class ProcessingPipeline:
             "files": [
                 {
                     "id": item.id,
-                    "filename": item.original_filename,
+                    "filename": display_filename(item.original_filename),
                     "status": item.status,
                     "progress": item.progress,
                     "error_code": item.error_code,
+                    "error_diagnostic": (diagnostics[item.id][1]
+                        if item.error_code and item.id in diagnostics and diagnostics[item.id][0] == item.error_code else None),
                 }
                 for item in files
             ],
