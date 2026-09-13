@@ -32,13 +32,14 @@ from qian_labor.security.local_redaction import (
 class AIProviderError(RuntimeError):
     """Safe provider error that never includes source text or credentials."""
 
-    def __init__(self, code: str, diagnostic: "AIDiagnostic | None" = None) -> None:
+    def __init__(self, code: str, diagnostic: "AIDiagnostic | None" = None, *, usage: UsageRecord | None = None) -> None:
         # Keep the stable public error code as the exception string. The
         # bounded diagnostic is separate so callers cannot accidentally expose
         # provider response text or validation context.
         super().__init__(code)
         self.code = code
         self.diagnostic = diagnostic or AIDiagnostic(category="provider")
+        self.usage = usage
 
 
 DiagnosticCategory = Literal[
@@ -95,6 +96,13 @@ class AIDiagnostic:
         "facts[].value_*",
         "facts[].source",
         "contract_advisory",
+        "schema_version", "document_type", "employee_name", "employee_number",
+        "department", "job_title", "needs_human_confirmation",
+        "contract_advisory.version", "contract_advisory.status",
+        "contract_advisory.observations", "contract_advisory.observations[].source",
+        "contract_advisory.observations[].issue", "contract_advisory.observations[].checks",
+        "contract_advisory.observations[].next_action",
+        "contract_advisory.observations[].unverified_references",
     ] | None = None
     validation_type: Literal[
         "empty",

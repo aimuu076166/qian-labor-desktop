@@ -81,7 +81,7 @@ export function EmployeeLedger({
         <div>
           <p className="eyebrow">员工风险台账</p>
           <h2 id="employee-ledger-title">员工台账</h2>
-          <p className="muted">共 {payload.total} 名员工，仅显示脱敏姓名。</p>
+          <p className="muted">共 {payload.total} 名员工，显示本地员工名称。</p>
         </div>
         <button type="button" className="secondary-action" onClick={onBack}>返回风险概览</button>
       </div>

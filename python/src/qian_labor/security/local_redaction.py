@@ -240,7 +240,13 @@ class LocalImageRedactor:
 class PrivacyBoundary:
     def __init__(self, pepper: str, image_redactor: LocalImageRedactor | None = None) -> None:
         self.pepper = pepper
-        self.image_redactor = image_redactor or LocalImageRedactor(pepper=pepper)
+        if image_redactor is None:
+            self.image_redactor = LocalImageRedactor(pepper=pepper)
+        else:
+            # 注入的 redactor 可能未携带 pepper；证据哈希是匹配关键路径，回填边界 pepper。
+            if not image_redactor.pepper:
+                image_redactor.pepper = pepper
+            self.image_redactor = image_redactor
 
     def prepare(
         self,
@@ -250,33 +256,59 @@ class PrivacyBoundary:
         is_image: bool,
         external: bool,
     ) -> PreparedProviderInput:
+        # 方案决策（2026-09）：外部通道为用户配置的智谱官方端点，正文与文件名
+        # 不再做遮盖/打码（遮盖曾导致社保号残缺、R10/R11 拿废数据，且扫描件
+        # OCR 依赖造成整批材料无法分析）。本地标识哈希保留，仅供员工匹配；
+        # 图片路径仍运行 OCR 提取证据哈希，但 OCR 失败不再阻断分析。
         if is_image:
+            hashes: dict[str, str] = {}
+            evidence: tuple[IdentifierEvidence, ...] = ()
+            ocr_blocks: tuple[ParsedBlock, ...] = ()
+            try:
+                redacted = self.image_redactor.redact_with_metadata(content)
+            except PrivacyBoundaryError:
+                redacted = None
+            if redacted is not None:
+                hashes = redacted.identifier_hashes
+                evidence = redacted.identifier_evidence
+                ocr_blocks = redacted.ocr_blocks
+            if self.pepper and not hashes and redacted is None:
+                # image_redactor 整体失败（无 OCR 结果）：仅此时用边界 pepper 重跑一次
+                # OCR 补证据哈希；redact 成功但 pepper 不匹配时不重复消耗 OCR。
+                try:
+                    tokens = self.image_redactor.ocr.extract_tokens(content)
+                except (PrivacyBoundaryError, AttributeError):
+                    tokens = []
+                if tokens:
+                    _, evidence = LocalImageRedactor._sensitive_token_indexes(
+                        tokens, self.pepper
+                    )
+                    hashes = LocalImageRedactor._unique_hashes(evidence)
             if not external:
-                return PreparedProviderInput(filename, content, {})
-            redacted = self.image_redactor.redact_with_metadata(content)
+                return PreparedProviderInput(filename, content, hashes, evidence, ocr_blocks)
             return PreparedProviderInput(
-                mask_sensitive(filename),
-                PreparedProviderContent(redacted.content),
-                redacted.identifier_hashes,
-                redacted.identifier_evidence,
-                redacted.ocr_blocks,
+                filename,
+                PreparedProviderContent(content),
+                hashes,
+                evidence,
+                ocr_blocks,
             )
         text = content.decode("utf-8", errors="replace")
+        # Parser-generated citation IDs are not employee identifiers. Exclude
+        # them only from local hashing, preserving offsets and outgoing bytes.
         spans = content.citation_spans if isinstance(content, ParserTextContent) else ()
-        pieces, evidence_pieces, start = [], [], 0
+        evidence_pieces, start = [], 0
         for left, right in spans:
-            pieces.extend((mask_sensitive(text[start:left]), text[left:right]))
-            evidence_pieces.extend((text[start:left], ' ' * (right-left)))
+            evidence_pieces.extend((text[start:left], " " * (right - left)))
             start = right
-        pieces.append(mask_sensitive(text[start:]))
         evidence_pieces.append(text[start:])
-        evidence = self._text_evidence(''.join(evidence_pieces)) if self.pepper else ()
+        evidence = self._text_evidence("".join(evidence_pieces)) if self.pepper else ()
         hashes = LocalImageRedactor._unique_hashes(evidence)
         if not external:
             return PreparedProviderInput(filename, content, hashes, evidence)
         return PreparedProviderInput(
-            mask_sensitive(filename),
-            PreparedProviderContent(''.join(pieces).encode("utf-8")),
+            filename,
+            PreparedProviderContent(content),
             hashes,
             evidence,
         )

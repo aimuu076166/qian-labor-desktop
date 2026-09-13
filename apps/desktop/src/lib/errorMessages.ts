@@ -58,7 +58,7 @@ const MESSAGES: Record<string, string> = {
   AI_ACCOUNT_ARREARS: '所选模型接口返回额度不足，请核对接口通道和对应额度；这不代表所有套餐均不可用。',
   AI_QUOTA_EXCEEDED: '所选接口的额度已用尽，请检查额度或等待重置。',
   AI_PLAN_EXPIRED: '所选接口返回套餐到期，请核对对应套餐状态。',
-  AI_SCHEMA_INVALID: '模型返回内容未完整通过结构校验（可能是空正文、JSON/字段结构或响应被截断），未作为有效分析结果采用。可重试失败材料。',
+  AI_SCHEMA_INVALID: '模型返回内容未完整通过结构校验，未作为有效分析结果采用。已有材料保留，可重试失败材料。',
   AI_NO_SUPPORTED_FACTS: '模型未提取到可用于本次体检的事实，不能据此判断没有风险。请检查材料内容，补充清晰、相关的材料后再分析。',
   AI_PROVIDER_ERROR: '模型请求未成功，请核对服务地址、网络和模型权限。',
   DESKTOP_REQUEST_TIMEOUT: '本机请求等待超时，操作可能仍在后台进行。请先重新读取状态，不要重复提交。',
@@ -74,6 +74,19 @@ export function describeOperationError(code: string): string {
   const message = MESSAGES[code] ?? '操作未完成，请重新读取当前状态；仍失败时保留材料并联系支持。';
   return /^(?:AI|DESKTOP|MATCH|PROCESSING|WORKSPACE|HISTORICAL|ADVISORY|FACT|ASSESSMENT|TASK|ANALYSIS)_[A-Z0-9_]+$/.test(code) ? `${message}（${code}）` : message;
 }
+
+const VALIDATION_MESSAGES: Record<string, string> = {
+  missing_field: '模型输出缺少必需字段',
+  invalid_type: '字段类型不符合约定',
+  conflict: '同一事实的多个值字段内容矛盾',
+  invalid_value: '字段取值不在约定范围',
+  unsupported: '模型自造了不可识别的字段或类型',
+  invalid_json: '模型输出不是有效 JSON 或被截断',
+  empty: '模型未输出可用内容',
+  not_object: '模型输出不是 JSON 对象',
+  not_list: '事实列表格式不正确',
+  not_string: '模型输出内容格式不正确',
+};
 
 const DIAGNOSTIC_MESSAGES: Record<string, string> = {
   configuration: '配置不完整',
@@ -91,11 +104,13 @@ const DIAGNOSTIC_MESSAGES: Record<string, string> = {
   provider: '模型服务返回了未分类错误',
 };
 
-export function describeOperationDiagnostic(diagnostic?: { category?: string; status_code?: number; finish_reason?: string; attempt?: number } | null): string | null {
+export function describeOperationDiagnostic(diagnostic?: { category?: string; validation_type?: string; status_code?: number; finish_reason?: string; attempt?: number } | null): string | null {
   if (!diagnostic || typeof diagnostic.category !== 'string') return null;
   const label = DIAGNOSTIC_MESSAGES[diagnostic.category];
   if (!label) return null;
+  const validation = VALIDATION_MESSAGES[diagnostic.validation_type ?? ''];
   const details = [
+    validation ?? '',
     typeof diagnostic.status_code === 'number' ? `HTTP ${diagnostic.status_code}` : '',
     diagnostic.finish_reason === 'length' ? '输出达到长度上限' : '',
     typeof diagnostic.attempt === 'number' ? `第 ${diagnostic.attempt} 次请求` : '',

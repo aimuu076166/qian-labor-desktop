@@ -52,7 +52,7 @@ export function EmployeeWorkspace({ analysisId, api, initialPayload, initialQuer
   return <EmployeeLedger payload={payload} busy={busy} onBack={onBack} onSelectEmployee={onSelectEmployee}
     controls={<>
       <form className="dashboard-actions" onSubmit={event => { event.preventDefault(); void load(1, draft.trim()); }}>
-        <label>搜索员工<input aria-label="搜索员工" placeholder="工号或脱敏姓名" maxLength={100}
+        <label>搜索员工<input aria-label="搜索员工" placeholder="工号或员工名称" maxLength={100}
           value={draft} onChange={event => setDraft(event.target.value)} disabled={busy} /></label>
         <button type="submit" className="secondary-action" disabled={busy}>{busy ? '正在读取…' : '搜索'}</button>
       </form>

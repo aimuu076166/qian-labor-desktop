@@ -20,7 +20,7 @@ from qian_labor.models.core import (
     UploadedFile,
     CompanyWorkspace, CompanyAnalysisBinding, EmployeeRecord, EmployeeSnapshotBinding,
 )
-from qian_labor.security.masking import mask_identity, mask_sensitive
+from qian_labor.security.masking import mask_sensitive
 from qian_labor.services.risk_evaluation import RiskEvaluationService
 from qian_labor.services.company_workspaces import require_material_mutation, WorkspaceError
 from qian_labor.desktop.company_schemas import EmployeeView
@@ -328,8 +328,8 @@ class EmployeeMatcher:
                     raise MatchDecisionError("MATCH_EMPLOYEE_NUMBER_EXISTS")
                 target = session.get(Employee, existing_binding.snapshot_id) if existing_binding else Employee(
                     analysis_id=analysis_id,
-                    masked_name=mask_identity(payload.display_name or "未识别人员"),
-                    normalized_name=mask_identity(payload.display_name or "未识别人员"),
+                    masked_name=mask_sensitive(payload.display_name or "未识别人员"),
+                    normalized_name=mask_sensitive(payload.display_name or "未识别人员"),
                     employee_number=employee_number,
                     match_status="confirmed",
                 )

@@ -190,9 +190,9 @@ def test_native_vision_real_synthetic_image_with_empty_path(monkeypatch, compile
     prepared = PrivacyBoundary("synthetic-native-pepper", LocalImageRedactor(MacOSVisionOCR())).prepare(
         "synthetic-native.png", output.getvalue(), is_image=True, external=True,
     )
-    with Image.open(io.BytesIO(prepared.content)) as redacted:
-        assert redacted.crop((phone.left, phone.top, phone.left + phone.width,
-                              phone.top + phone.height)).getextrema() == ((0, 0), (0, 0), (0, 0))
+    # 方案决策（2026-09）：图片不再打码，原图字节直达通道；OCR 仅提供本地哈希。
+    assert prepared.identifier_hashes.get("phone_hash")
+    assert bytes(prepared.content) == output.getvalue()
 
 
 @pytest.mark.parametrize("content", [b"synthetic invalid image", b"", b"x" * (20 * 1024 * 1024 + 1), png()],

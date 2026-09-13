@@ -67,19 +67,19 @@ def test_tesseract_reads_tab_separated_words_and_original_coordinates(monkeypatc
     ]
 
 
-def test_real_tsv_adapter_redacts_sensitive_boxes_before_external_preparation(monkeypatch):
+def test_real_tsv_adapter_keeps_image_bytes_intact_for_external_preparation(monkeypatch):
+    """图片不再本地打码：原图直达通道，仅保留本地标识哈希供员工匹配。"""
     _synthetic_tesseract_tsv(monkeypatch)
+    original = _white_png()
 
     prepared = PrivacyBoundary("synthetic-test-pepper").prepare(
-        "synthetic-scan.png", _white_png(), is_image=True, external=True
+        "synthetic-scan.png", original, is_image=True, external=True
     )
 
     assert prepared.identifier_hashes["phone_hash"] == identifier_hash(
         "phone", "13912345678", "synthetic-test-pepper"
     )
-    with Image.open(io.BytesIO(prepared.content)) as image:
-        assert image.getpixel((40, 20)) == (0, 0, 0)
-        assert image.getpixel((40, 55)) == (255, 255, 255)
+    assert bytes(prepared.content) == original
 
 
 def _tesseract_quote_then_phone(monkeypatch, quote_token: str) -> None:
@@ -105,15 +105,15 @@ def test_tesseract_literal_quotes_keep_following_word_and_its_box(monkeypatch, q
     ]
 
 
-def test_standalone_quote_cannot_leave_following_phone_box_unredacted(monkeypatch):
+def test_standalone_quote_keeps_image_bytes_and_phone_hash(monkeypatch):
     _tesseract_quote_then_phone(monkeypatch, '"')
 
+    original = _white_png()
     prepared = PrivacyBoundary("synthetic-test-pepper").prepare(
-        "synthetic-quote-scan.png", _white_png(), is_image=True, external=True
+        "synthetic-quote-scan.png", original, is_image=True, external=True
     )
 
-    with Image.open(io.BytesIO(prepared.content)) as image:
-        assert image.crop((30, 30, 130, 54)).getextrema() == ((0, 0), (0, 0), (0, 0))
+    assert bytes(prepared.content) == original
     assert prepared.identifier_hashes["phone_hash"] == identifier_hash(
         "phone", "13912345678", "synthetic-test-pepper"
     )
@@ -126,16 +126,19 @@ def test_standalone_quote_cannot_leave_following_phone_box_unredacted(monkeypatc
     b"text\tleft\nSYNTHETIC\t20\n",  # Missing remaining coordinates.
     b"\xff",  # Not UTF-8.
 ])
-def test_empty_or_damaged_tesseract_output_cannot_cross_privacy_boundary(monkeypatch, output):
+def test_damaged_tesseract_output_still_yields_ocr_tokens_without_blocking(monkeypatch, output):
+    """图片不再依赖 OCR 成败：解析失败仅意味着无本地哈希，不阻断分析。"""
     monkeypatch.setattr(
         "qian_labor.security.local_redaction.subprocess.run",
         lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=output, stderr=b""),
     )
 
-    with pytest.raises(PrivacyBoundaryError, match="AI_LOCAL_REDACTION_FAILED"):
-        PrivacyBoundary("synthetic-test-pepper").prepare(
-            "synthetic-scan.png", _white_png(), is_image=True, external=True
-        )
+    original = _white_png()
+    prepared = PrivacyBoundary("synthetic-test-pepper").prepare(
+        "synthetic-scan.png", original, is_image=True, external=True
+    )
+    assert bytes(prepared.content) == original
+    assert prepared.identifier_hashes == {}
 
 
 def _valid_identity(serial: str = "123") -> str:

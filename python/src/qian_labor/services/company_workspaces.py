@@ -9,12 +9,12 @@ from qian_labor.desktop.company_schemas import CompanyView, EmployeeView, Snapsh
 from qian_labor.models.core import (
     AnalysisBatch, CompanyWorkspace, CompanyAnalysisBinding, Employee,
     EmployeeMatchCandidate, EmployeeRecord, EmployeeSnapshotBinding, WorkspacePreference,
-    EmploymentFact, SourceLocator, UploadedFile,
+    EmploymentFact, SourceLocator, UploadedFile, AuditEvent,
 )
 from qian_labor.services.analyses import AnalysisService
 from qian_labor.services.assessment_scope import DESKTOP_PROFILE
 from qian_labor.services.dashboard import DashboardService
-from qian_labor.security.masking import mask_identity
+from qian_labor.security.masking import mask_sensitive
 from qian_labor.sqlite_migrations import assert_no_pending_recovery
 
 
@@ -84,7 +84,7 @@ class CompanyWorkspaceService:
     @staticmethod
     def _new_record(s, company_id, request):
         item = EmployeeRecord(id=str(request.id), company_id=company_id,
-            masked_name=mask_identity(request.display_name), employee_number=request.employee_number,
+            masked_name=mask_sensitive(request.display_name), employee_number=request.employee_number,
             department=request.department, job_title=request.job_title)
         s.add(item)
         s.flush()
@@ -296,6 +296,33 @@ class CompanyWorkspaceService:
                     "bindings": [SnapshotBindingView.model_validate(b) for b in bindings],
                     "current_binding": SnapshotBindingView.model_validate(current[0]) if current else None,
                     "historical_bindings": [SnapshotBindingView.model_validate(b) for b in bindings if b not in current]}
+
+    def correct_display_name(self, company_id, record_id, request):
+        with self._write() as s:
+            company = self._company(s, company_id)
+            item = s.get(EmployeeRecord, record_id)
+            if item is None or item.company_id != company_id:
+                raise WorkspaceError("WORKSPACE_EMPLOYEE_NOT_FOUND", 404)
+            if item.version != request.expected_record_version:
+                raise WorkspaceError("WORKSPACE_EMPLOYEE_VERSION_CONFLICT")
+            item.masked_name = mask_sensitive(request.display_name)
+            item.version += 1
+            company.version += 1
+            # Update only the current snapshot; historical and frozen reports
+            # retain the name that was displayed when they were saved.
+            bindings = s.scalars(select(EmployeeSnapshotBinding).join(
+                CompanyAnalysisBinding, CompanyAnalysisBinding.analysis_id == EmployeeSnapshotBinding.analysis_id
+            ).where(EmployeeSnapshotBinding.employee_record_id == record_id,
+                    CompanyAnalysisBinding.role == "current"))
+            for binding in bindings:
+                snapshot = s.get(Employee, binding.snapshot_id)
+                snapshot.masked_name = item.masked_name
+                snapshot.normalized_name = item.masked_name
+                s.add(AuditEvent(analysis_id=binding.analysis_id, actor="competition-user",
+                                event_type="employee_display_name_corrected",
+                                metadata_json={"employee_record_id": record_id, "version": item.version}))
+            s.flush()
+            return EmployeeView.model_validate(item)
 
     def _binding(self, s, company_id, analysis_id):
         company = self._company(s, company_id)

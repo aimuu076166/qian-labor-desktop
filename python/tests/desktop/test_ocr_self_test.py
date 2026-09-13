@@ -51,7 +51,7 @@ def test_self_test_checks_printed_ink_not_font_advance_whitespace(monkeypatch, c
     assert capsys.readouterr().out == "LOCAL_OCR=PASS\n"
 
 
-@pytest.mark.parametrize("fault", ["no_phone", "ocr_error", "unredacted", "bad_hash", "wrong_box"])
+@pytest.mark.parametrize("fault", ["no_phone", "ocr_error", "content_changed", "bad_hash", "wrong_box"])
 def test_ocr_self_test_failure_never_leaks_details(monkeypatch, capsys, fault):
     from qian_labor.desktop import ocr_self_test
     monkeypatch.setattr(sys, "frozen", False, raising=False)
@@ -61,15 +61,16 @@ def test_ocr_self_test_failure_never_leaks_details(monkeypatch, capsys, fault):
             print("synthetic-private-error")
             raise RuntimeError("synthetic-private-error")
         if fault == "no_phone": return [OCRToken("SYNTHETIC", 20, 100, 330, 45, "line")]
-        if fault == "wrong_box": return [OCRToken("13912345678", 20, 20, 330, 45, "wrong-line")]
+        if fault == "wrong_box": return [OCRToken("SYNTHETIC", 20, 20, 330, 45, "wrong-line"), OCRToken("13999999999", 20, 100, 330, 45, "wrong-line2")]
         return synthetic_tokens(self, content)
     monkeypatch.setattr(TesseractOCR, "extract_tokens", extract)
-    if fault in {"unredacted", "bad_hash"}:
+    if fault in {"content_changed", "bad_hash"}:
         original_prepare = ocr_self_test.PrivacyBoundary.prepare
         def unchanged(self, filename, content, **kwargs):
             result = original_prepare(self, filename, content, **kwargs)
-            if fault == "unredacted":
-                return PreparedProviderInput(filename, content, result.identifier_hashes)
+            if fault == "content_changed":
+                # 图片内容被意外改写（应原样透传）→ 自检必须 FAIL。
+                return PreparedProviderInput(filename, content + b"x", result.identifier_hashes)
             return PreparedProviderInput(filename, result.content, {"phone_hash": "not-a-valid-hash"})
         monkeypatch.setattr(ocr_self_test.PrivacyBoundary, "prepare", unchanged)
     assert ocr_self_test.run() == 1

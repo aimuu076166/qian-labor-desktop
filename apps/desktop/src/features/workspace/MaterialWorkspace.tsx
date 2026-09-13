@@ -8,11 +8,18 @@ export type WorkspacePayload = {
   files: Array<{ id: string; filename: string; status: string; progress: number;
     detected_kind: string; classified_kind: string; error_code: string | null; size_bytes: number; fact_count?: number;
     warnings?: string[]; needs_reextraction?: boolean; extraction_version?: string | null;
+    unreceived_count?: number; unreceived?: Array<{ reason: string; index?: string; fact_type?: string }>;
     error_diagnostic?: { category?: string; status_code?: number; finish_reason?: string; attempt?: number } | null }>;
 };
 
 const FILE_STATUS: Record<string, string> = { uploaded: '待分析', parsing: '正在解析',
   extracting: '正在提取', processed: '已处理', partial: '部分处理', failed: '处理失败', interrupted: '已中断，待恢复' };
+
+const UNRECEIVED_REASONS: Record<string, string> = {
+  unsupported_fact_type: '不支持的事实类型', invalid_structure: '输出结构不符合要求',
+  invalid_source: '来源信息不符合要求', unconvertible_value_type: '事实值无法转换',
+  invalid_value: '事实值不符合要求', invalid_fact: '事实字段不符合要求',
+};
 
 export function ImportResults({ results }: { results: ImportOutcome[] }) {
   const imported = results.filter(r => r.status === 'imported').length;
@@ -40,10 +47,10 @@ export function MaterialWorkspace({ payload, configured, busy, error, onAdd, onP
       <p>{payload.analysis.company_display_name} · 共 {payload.files.length} 份材料</p></div>
       <button type="button" className="text-action" onClick={onBack}>返回风险概览</button>
     </div>
-    {!readOnly ? <><p className="muted">开始分析后，需要模型提取的材料将在本地脱敏后发送至你配置的智谱官方通道；脱敏可能存在遗漏，AI 输出仍需人工复核。</p>
+    {!readOnly ? <><p className="muted">开始分析后，材料内容将发送至你配置的智谱官方通道；AI 输出仍需人工复核。</p>
       <p className="muted">仅处理尚未完成提取、没有有效输出或需要更新来源核验及条款观察的材料，可能消耗所选通道额度；已有材料和结果会保留，新提取可能改变判断。</p></> : null}
-    {!readOnly ? <p className="muted">模型未执行或无法读取的条款，可明确开始分析重试；会重新发送该文件的脱敏内容（包括已成功部分），可能再次消耗额度。无法读取的内嵌图片会明确显示为部分材料，不会被静默忽略。</p> : null}
-    {payload.files.some(file => file.needs_reextraction) ? <p role="status">部分旧版材料尚未完成当前来源核验；明确开始分析后才会重新提取。</p> : null}
+    {!readOnly ? <p className="muted">模型未执行或无法读取的条款，可明确开始分析重试；会重新发送该文件的内容（包括已成功部分），可能再次消耗额度。无法读取的内嵌图片会明确显示为部分材料，不会被静默忽略。</p> : null}
+    {payload.files.some(file => file.needs_reextraction && !file.unreceived_count) ? <p role="status">部分材料尚未完成当前提取或来源核验；明确开始分析后才会重新提取。</p> : null}
     {error ? <p role="alert">{describeOperationError(error)}</p> : null}
     {importResults?.length ? <ImportResults results={importResults} /> : null}
     {processDisabled ? <p role="status">当前任务正在处理或等待恢复，暂不能添加材料或开始分析；请等待任务结束后再操作。</p> : null}
@@ -58,6 +65,12 @@ export function MaterialWorkspace({ payload, configured, busy, error, onAdd, onP
         {onSelectAdvisory ? <button type="button" onClick={() => onSelectAdvisory(file.id)}>查看 {file.filename} 条款观察</button> : null}
         {file.warnings?.includes('embedded_images_need_vision') ? <p>内嵌图片尚未提取，请将图片单独导入后分析；已提取文字仍保留。</p> : null}
         {file.warnings?.includes('empty_csv') ? <p>表格没有可提取的内容，请核对原材料。</p> : null}
+        {file.unreceived_count ? <div>
+          <p>{file.unreceived_count} 项模型输出未接收，已接收事实仍保留；不能据此判断没有风险。</p>
+          <p>原因：{Array.from(new Set((file.unreceived ?? []).map(item =>
+            UNRECEIVED_REASONS[item.reason] ?? '输出未通过校验，需人工核对'))).join('；')}。</p>
+          {!readOnly ? <p>可点击“开始分析”重试该文件（包括已成功部分），可能再次消耗额度。</p> : null}
+        </div> : null}
       </td>
     </tr>)}</tbody></table></div>
     {!payload.files.length ? <p>尚未添加材料。</p> : null}

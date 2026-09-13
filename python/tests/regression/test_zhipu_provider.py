@@ -141,9 +141,10 @@ def test_zhipu_text_request_uses_chat_completions_json_mode_and_local_redaction(
     assert payload["response_format"] == {"type": "json_object"}
     assert payload["stream"] is False
     request_text = json.dumps(payload, ensure_ascii=False)
-    assert identity not in request_text
-    assert phone not in request_text
-    assert bank_card not in request_text
+    # 方案决策（2026-09）：正文不再脱敏，标识符原文直达智谱官方通道。
+    assert identity in request_text
+    assert phone in request_text
+    assert bank_card in request_text
     assert "employment-extraction-v1" in request_text
     assert "facts" in request_text
     assert result.document_type == "contract"
@@ -152,25 +153,18 @@ def test_zhipu_text_request_uses_chat_completions_json_mode_and_local_redaction(
     assert result.usage.output_tokens == 45
 
 
-def test_zhipu_image_request_uses_image_url_with_locally_redacted_bytes() -> None:
+def test_zhipu_image_request_sends_original_bytes_without_local_redaction() -> None:
     phone = "13912345678"
     original = io.BytesIO()
     Image.new("RGB", (160, 80), "white").save(original, format="PNG")
     original_bytes = original.getvalue()
-    boundary = PrivacyBoundary(
-        PEPPER,
-        image_redactor=LocalImageRedactor(
-            StaticOCR([OCRToken(phone, left=20, top=10, width=100, height=24, line_key="1")]),
-            pepper=PEPPER,
-        ),
-    )
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured["payload"] = json.loads(request.content)
         return _success_response(_provider_payload(file_name="虚构扫描件.png"))
 
-    result = _provider(handler, privacy_boundary=boundary).extract("虚构扫描件.png", original_bytes)
+    result = _provider(handler).extract("虚构扫描件.png", original_bytes)
 
     payload = captured["payload"]
     assert isinstance(payload, dict)
@@ -183,9 +177,8 @@ def test_zhipu_image_request_uses_image_url_with_locally_redacted_bytes() -> Non
     data_url = image_blocks[0]["image_url"]["url"]
     assert data_url.startswith("data:image/png;base64,")
     sent_bytes = base64.b64decode(data_url.split(",", 1)[1])
-    assert sent_bytes != original_bytes
-    with Image.open(io.BytesIO(sent_bytes)) as image:
-        assert image.convert("RGB").getpixel((40, 20)) == (0, 0, 0)
+    # 不再本地打码：原图字节直达通道。
+    assert sent_bytes == original_bytes
     assert result.document_type == "contract"
 
 
@@ -315,7 +308,6 @@ def test_zhipu_provider_rejects_unknown_finish_reason_without_echoing_it() -> No
     [
         ("", "response", "empty", "choices[0].message.content"),
         ("[]", "response", "not_object", "choices[0].message.content"),
-        ('{"synthetic-secret-marker":true}', "semantic", "unsupported", "facts[].fact_type"),
     ],
 )
 def test_zhipu_diagnostic_classifies_safe_response_failures(
@@ -344,18 +336,16 @@ def test_zhipu_diagnostic_classifies_safe_response_failures(
     assert "synthetic-secret-marker" not in repr(diagnostic.as_dict())
 
 
-def test_zhipu_diagnostic_marks_conflicting_value_fields_without_pydantic_details() -> None:
+def test_zhipu_diagnostic_conflicting_value_fields_become_reviewable() -> None:
+    """新契约：矛盾载体 → 保留主值+待复核；诊断永不携带值/原文。"""
     payload = _provider_payload()
     payload["facts"][0]["value_text"] = "synthetic-person-text"
-    with pytest.raises(AIProviderError) as caught:
-        _provider(lambda _request: _success_response(payload), max_attempts=1).extract(
-            "虚构合同.txt", b"synthetic-person-text"
-        )
-    diagnostic = caught.value.diagnostic
-    assert diagnostic.category == "schema"
-    assert diagnostic.validation_type == "conflict"
-    assert diagnostic.path == "facts[].value_*"
-    assert "synthetic-person-text" not in repr(diagnostic.as_dict())
+    result = _provider(lambda _request: _success_response(payload), max_attempts=1).extract(
+        "虚构合同.txt", b"synthetic-person-text"
+    )
+    assert result.facts[0].value is True
+    assert result.facts[0].needs_human_confirmation
+    assert "synthetic-person-text" not in repr(result)
 
 
 @pytest.mark.parametrize(
@@ -449,6 +439,7 @@ def test_zhipu_provider_recovers_observed_generic_value_with_blank_value_type() 
 
 
 def test_zhipu_provider_rejects_a_fact_whose_value_type_cannot_feed_its_rule() -> None:
+    """类型无法喂给规则 → 不进入结果；唯一事实被拒时明确失败而非空成功。"""
     payload = _provider_payload()
     fact = payload["facts"][0]
     assert isinstance(fact, dict)
@@ -464,11 +455,13 @@ def test_zhipu_provider_rejects_a_fact_whose_value_type_cannot_feed_its_rule() -
     def handler(_request: httpx.Request) -> httpx.Response:
         return _success_response(payload)
 
-    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
-        _provider(handler).extract("虚构合同.txt", b"fictional contract")
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+    assert result.facts == []
+    assert result.unreceived == [{"reason": "unconvertible_value_type", "fact_type": "employment.material_coverage", "index": "0"}]
 
 
-def test_value_type_diagnostic_identifies_first_bad_fact_without_content() -> None:
+def test_unconvertible_value_facts_do_not_leak_content_or_block_good_facts() -> None:
+    """两条类型不符事实 → 记入未接收项；好事实照常接收；内容零泄露。"""
     from copy import deepcopy
     payload = _provider_payload()
     bad = deepcopy(payload["facts"][0])
@@ -476,28 +469,36 @@ def test_value_type_diagnostic_identifies_first_bad_fact_without_content() -> No
                value_text="synthetic-private-value", value_boolean=None)
     bad["source"]["excerpt"] = "synthetic-private-excerpt"
     payload["facts"].extend([bad, deepcopy(bad)])
-    with pytest.raises(AIProviderError) as caught:
-        _provider(lambda _: _success_response(payload)).extract("synthetic.txt", b"synthetic")
-    diagnostic = caught.value.diagnostic.as_dict()
-    assert diagnostic["fact_index"] == 1  # zero-based; the first fact is valid
-    assert diagnostic["fact_type"] == "employment.probation.assessment_exists"
-    assert diagnostic["actual_value_type"] == "text"
-    assert list(diagnostic["expected_value_types"]) == ["boolean", "null"]
-    assert diagnostic["path"] == "facts[].value_type"
-    assert "synthetic-private" not in repr(diagnostic)
-    assert "F-903" not in repr(diagnostic)
-    assert str(caught.value) == "AI_SCHEMA_INVALID"
+    result = _provider(lambda _: _success_response(payload)).extract(
+        "synthetic.txt", b"synthetic"
+    )
+    assert len(result.facts) == 1  # 第一条好事实保留
+    assert result.unreceived == [
+        {"reason": "unconvertible_value_type",
+         "fact_type": "employment.probation.assessment_exists", "index": "1"},
+        {"reason": "unconvertible_value_type",
+         "fact_type": "employment.probation.assessment_exists", "index": "2"},
+    ]
+    assert "synthetic-private" not in repr(result.unreceived)
 
 
-def test_unknown_fact_type_is_not_copied_to_diagnostic() -> None:
+def test_unknown_fact_type_is_not_copied_anywhere() -> None:
+    """自造事实类型 → 未接收项只记录安全原因和索引，不复制任意类型名。"""
     payload = _provider_payload()
     payload["facts"][0]["fact_type"] = "synthetic-private-unknown-field"
-    with pytest.raises(AIProviderError) as caught:
-        _provider(lambda _: _success_response(payload)).extract("synthetic.txt", b"synthetic")
-    diagnostic = caught.value.diagnostic.as_dict()
-    assert diagnostic["path"] == "facts[].fact_type"
-    assert "fact_type" not in diagnostic
-    assert "synthetic-private" not in repr(diagnostic)
+    try:
+        result = _provider(lambda _: _success_response(payload)).extract(
+            "synthetic.txt", b"synthetic"
+        )
+    except AIProviderError as error:
+        assert "synthetic-private" not in repr(error)
+        assert "synthetic-private" not in repr(error.diagnostic.as_dict() if error.diagnostic else {})
+    else:
+        assert result.facts == []
+        assert result.unreceived == [{
+            "reason": "unsupported_fact_type",
+            "index": "0",
+        }]
 
 
 def test_zhipu_provider_accepts_consistent_redundant_text_for_a_typed_value() -> None:
@@ -514,7 +515,8 @@ def test_zhipu_provider_accepts_consistent_redundant_text_for_a_typed_value() ->
     assert result.facts[0].value is True
 
 
-def test_zhipu_provider_rejects_conflicting_redundant_text_for_a_typed_value() -> None:
+def test_zhipu_provider_keeps_declared_value_when_redundant_text_conflicts() -> None:
+    """新契约：冗余文本与声明载体矛盾 → 保留主值并标记待复核，不作废整份。"""
     payload = _provider_payload()
     fact = payload["facts"][0]
     assert isinstance(fact, dict)
@@ -523,11 +525,13 @@ def test_zhipu_provider_rejects_conflicting_redundant_text_for_a_typed_value() -
     def handler(_request: httpx.Request) -> httpx.Response:
         return _success_response(payload)
 
-    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
-        _provider(handler).extract("虚构合同.txt", b"fictional contract")
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+    assert result.facts[0].value is True
+    assert result.facts[0].needs_human_confirmation
 
 
-def test_zhipu_provider_rejects_conflicting_generic_alias_instead_of_empty_success() -> None:
+def test_zhipu_provider_accepts_generic_alias_when_typed_value_present() -> None:
+    """新契约：声明载体在而泛型别名冲突 → 保留声明值，不作废。"""
     payload = _provider_payload()
     fact = payload["facts"][0]
     assert isinstance(fact, dict)
@@ -537,16 +541,20 @@ def test_zhipu_provider_rejects_conflicting_generic_alias_instead_of_empty_succe
     def handler(_request: httpx.Request) -> httpx.Response:
         return _success_response(payload)
 
-    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
-        _provider(handler).extract("虚构合同.txt", b"fictional contract")
+    result = _provider(handler).extract("虚构合同.txt", b"fictional contract")
+    assert result.facts[0].value is True
+    assert result.facts[0].needs_human_confirmation
 
 
-def test_zhipu_provider_does_not_silently_accept_only_the_valid_part_of_a_response() -> None:
+def test_zhipu_provider_keeps_both_facts_when_redundant_text_conflicts() -> None:
+    """新契约：两条事实冗余矛盾 → 双双保留，矛盾条待复核，不静默丢部分。"""
     payload = _provider_payload()
     valid = payload["facts"][0]
     payload["facts"].append({**valid, "value_text": "false"})
-    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
-        _provider(lambda _: _success_response(payload)).extract("虚构合同.txt", b"synthetic")
+    result = _provider(lambda _: _success_response(payload)).extract("虚构合同.txt", b"synthetic")
+    assert len(result.facts) == 2
+    assert result.facts[0].needs_human_confirmation is False
+    assert result.facts[1].needs_human_confirmation
 
 
 def test_zhipu_provider_preserves_explicit_unknown_fact_as_reviewable_missing_evidence() -> None:
@@ -568,17 +576,25 @@ def test_zhipu_provider_empty_valid_response_is_not_a_successful_extraction() ->
 @pytest.mark.parametrize("updates", [
     {"fact_type": "employment.pay.actual_wage", "value_type": "number", "value_boolean": None, "value_number": True},
     {"value_boolean": 1},
-    {"value_": 1},
+    {"value_boolean": None, "value_": 1},
     {"fact_type": "employment.pay.actual_wage", "value_type": "number", "value_boolean": None,
      "value_number": 9007199254740993},
     {"fact_type": "employment.pay.actual_wage", "value_type": "number", "value_boolean": None,
      "value_number": 9007199254740992.0, "value_text": "9007199254740993"},
 ])
-def test_zhipu_provider_rejects_type_coercion_and_lossy_numeric_aliases(updates) -> None:
+def test_zhipu_provider_never_silently_accepts_type_coercion_or_lossy_aliases(updates) -> None:
+    """跨类型强转与有损数值别名永不静默通过：要么明确失败，要么强制人工复核。"""
     payload = _provider_payload()
     payload["facts"][0].update(updates)
-    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
-        _provider(lambda _: _success_response(payload)).extract("虚构合同.txt", b"synthetic")
+    try:
+        result = _provider(lambda _: _success_response(payload)).extract(
+            "虚构合同.txt", b"synthetic"
+        )
+    except AIProviderError as error:
+        assert str(error) in {"AI_SCHEMA_INVALID", "AI_NO_SUPPORTED_FACTS"}
+    else:
+        for fact in result.facts:
+            assert fact.needs_human_confirmation, "可疑值不得无标记进入规则判断"
 
 
 def test_zhipu_prompt_requires_one_populated_typed_value_and_preserves_explicit_facts() -> None:

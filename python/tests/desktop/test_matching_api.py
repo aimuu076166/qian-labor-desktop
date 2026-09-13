@@ -135,6 +135,21 @@ def test_matching_candidates_are_exposed_as_masked_review_data(tmp_path: Path) -
     }
 
 
+def test_manual_match_preserves_short_local_display_name(tmp_path: Path) -> None:
+    app = create_desktop_app(data_dir=tmp_path / "app-data", launch_token=TOKEN)
+    seeded = _seed_review(app)
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/analyses/{seeded['analysis_id']}/matching-decisions", headers=HEADERS,
+            json={"candidate_id": seeded["candidate_id"], "decision": "create_unknown",
+                  "display_name": "甲测试", "fact_ids": [seeded["fact_id"]]},
+        )
+    assert response.status_code == 200
+    with app.state.database.session() as session:
+        fact = session.get(EmploymentFact, seeded["fact_id"])
+        assert session.get(Employee, fact.employee_id).masked_name == "甲测试"
+
+
 def test_last_match_assignment_resumes_rules_and_completes_analysis(tmp_path: Path) -> None:
     app = create_desktop_app(data_dir=tmp_path / "app-data", launch_token=TOKEN)
     seeded = _seed_review(app)

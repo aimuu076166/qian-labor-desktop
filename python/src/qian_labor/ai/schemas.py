@@ -142,6 +142,9 @@ class ExtractionResult(BaseModel):
     entities: dict[str, str] = Field(default_factory=dict)
     needs_human_confirmation: bool = False
     facts: list[EmploymentFact] = Field(default_factory=list)
+    # 未能接收的模型输出项（自造事实类型等）。每项只含原因与类型名，
+    # 不携带值或原文；空列表表示全部输出均已接收。
+    unreceived: list[dict[str, str]] = Field(default_factory=list)
     contract_advisory: ContractAdvisory | None = None
     usage: UsageRecord = Field(default_factory=UsageRecord)
 

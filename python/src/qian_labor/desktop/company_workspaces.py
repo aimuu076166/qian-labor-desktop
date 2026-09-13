@@ -1,5 +1,6 @@
 """Authenticated by the desktop /api middleware; validation errors never echo inputs."""
 from fastapi import APIRouter, Query
+from contextlib import nullcontext
 from uuid import UUID
 from typing import Literal
 from fastapi.exceptions import RequestValidationError
@@ -8,7 +9,7 @@ from fastapi.routing import APIRoute
 
 from qian_labor.desktop.company_schemas import (
     AdoptionRequest, BindingView, CompanyAnalysisPage, CompanyCreate, CompanyView, EmployeeCreate,
-    EmployeeDetail, EmployeePage, EmployeeView, PreferenceUpdate, PreferenceView,
+    EmployeeDetail, EmployeePage, EmployeeView, EmployeeDisplayNameUpdate, PreferenceUpdate, PreferenceView,
     CurrentAnalysisCreate, HistoricalImportRequest, HistoricalImportView,
 )
 from qian_labor.services.company_workspaces import CompanyWorkspaceService, WorkspaceError
@@ -147,6 +148,12 @@ def company_workspace_router(database, processing_queue, import_service):
     @router.get("/company-workspaces/{company_id}/employees/{record_id}", response_model=EmployeeDetail)
     def employee(company_id: str, record_id: str):
         return service.employee(company_id, record_id)
+
+    @router.put("/company-workspaces/{company_id}/employees/{record_id}/display-name", response_model=EmployeeView)
+    def correct_display_name(company_id: str, record_id: str, request: EmployeeDisplayNameUpdate):
+        current = service.current_analysis(company_id)
+        with processing_queue.mutation(current["analysis_id"]) if current else nullcontext():
+            return service.correct_display_name(company_id, record_id, request)
 
     @router.get("/company-workspaces/{company_id}/analyses/{analysis_id}/binding", response_model=BindingView)
     def binding(company_id: str, analysis_id: str):

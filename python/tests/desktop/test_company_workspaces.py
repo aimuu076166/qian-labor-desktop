@@ -7,7 +7,7 @@ from sqlalchemy import select, func
 
 from qian_labor.desktop.app import create_desktop_app
 from qian_labor.models.core import AnalysisBatch, Employee
-from qian_labor.security.masking import mask_identity
+from qian_labor.security.masking import mask_sensitive
 
 HEADERS = {"X-Qian-Desktop-Token": "synthetic-company-token"}
 
@@ -66,6 +66,50 @@ def record(client, owner, number="SYN-001", version=0):
     return response.json()
 
 
+def test_short_manual_employee_names_remain_distinguishable(api):
+    client, _ = api
+    c = company(client)
+    for version, name in enumerate(["甲测试", "乙测试"]):
+        response = client.post(f'/api/company-workspaces/{c["id"]}/employees', json={
+            "id": str(uuid4()), "expected_company_version": version, "display_name": name,
+        })
+        assert response.status_code == 201
+        assert response.json()["masked_name"] == name
+    listing = client.get(f'/api/company-workspaces/{c["id"]}/employees?search=甲测试').json()
+    assert listing["total"] == 1
+
+
+def test_correct_local_display_name_with_version_guard(api):
+    client, db = api
+    c = company(client)
+    e = record(client, c["id"])
+    from qian_labor.models.core import CompanyAnalysisBinding, EmployeeSnapshotBinding, AuditEvent
+    current_id, current_snapshot = snapshot(db)
+    history_id, history_snapshot = snapshot(db)
+    with db.session() as session:
+        for aid, sid, role in [(current_id, current_snapshot, "current"), (history_id, history_snapshot, "historical")]:
+            session.add(CompanyAnalysisBinding(analysis_id=aid, company_id=c["id"], role=role))
+            session.add(EmployeeSnapshotBinding(snapshot_id=sid, employee_record_id=e["id"], analysis_id=aid, company_id=c["id"]))
+        session.commit()
+    url = f'/api/company-workspaces/{c["id"]}/employees/{e["id"]}/display-name'
+    body = {"display_name": "甲测试", "expected_record_version": 0}
+    assert client.put(url, json=body, headers={"X-Qian-Desktop-Token": "wrong"}).status_code == 401
+    other = company(client)
+    assert client.put(url.replace(c["id"], other["id"]), json=body).status_code == 404
+    assert client.put(url, json={**body, "display_name": " "}).status_code == 422
+    result = client.put(url, json=body)
+    assert result.status_code == 200
+    assert result.json()["masked_name"] == "甲测试"
+    assert result.json()["version"] == 1
+    assert client.put(url, json={**body, "display_name": "乙测试"}).status_code == 409
+    assert client.get(url.removesuffix('/display-name')).json()["masked_name"] == "甲测试"
+    with db.session() as session:
+        assert session.get(Employee, current_snapshot).masked_name == "甲测试"
+        assert session.get(Employee, history_snapshot).masked_name == "合成***"
+        event = session.scalar(select(AuditEvent).where(AuditEvent.event_type == "employee_display_name_corrected"))
+        assert event.metadata_json == {"employee_record_id": e["id"], "version": 1}
+
+
 def snapshot(db):
     with db.session() as session:
         batch = AnalysisBatch(name="合成历史", company_display_name="虚构企业", status="completed")
@@ -82,7 +126,7 @@ def test_company_employee_auth_masking_pagination_and_restart(api, tmp_path):
     assert client.get("/api/company-workspaces", headers={"X-Qian-Desktop-Token": "wrong"}).status_code == 401
     c = company(client)
     e = record(client, c["id"])
-    assert e["masked_name"] == mask_identity("完全虚构员工")
+    assert e["masked_name"] == mask_sensitive("完全虚构员工")
     assert "display_name" not in e
     assert e["version"] == 0 and e["lifecycle_status"] == "active"
     assert client.get(f'/api/company-workspaces/{c["id"]}').json()["version"] == 1

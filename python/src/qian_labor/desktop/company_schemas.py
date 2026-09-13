@@ -48,6 +48,11 @@ class EmployeeCreate(RecordCreate):
     expected_company_version: int = Field(ge=0, strict=True)
 
 
+class EmployeeDisplayNameUpdate(Input):
+    display_name: str = Field(min_length=1, max_length=100)
+    expected_record_version: int = Field(ge=0, strict=True)
+
+
 class CurrentAnalysisCreate(Input):
     id: UUID
     expected_company_version: int = Field(ge=0, strict=True)

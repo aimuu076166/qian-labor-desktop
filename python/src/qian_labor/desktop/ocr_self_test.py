@@ -37,17 +37,12 @@ def _check() -> bool:
     prepared = boundary.prepare("synthetic-ocr-self-test.png", content, is_image=True, external=True)
     if prepared.identifier_hashes.get("phone_hash") != identifier_hash("phone", PHONE, PEPPER):
         return False
-    with Image.open(io.BytesIO(prepared.content)) as redacted:
-        if redacted.size != (700, 200):
-            return False
-        pixels = redacted.convert("RGB")
-        boxes = [printed_phone_box]
-        for token in phone_tokens:
-            box = (token.left, token.top, token.left + token.width, token.top + token.height)
-            if not (0 <= box[0] < box[2] <= 700 and 0 <= box[1] < box[3] <= 200):
-                return False
-            boxes.append(box)
-        if any(pixels.crop(box).getextrema() != ((0, 0), (0, 0), (0, 0)) for box in boxes):
+    # 新契约：图片不打码。自检改为验证原图完整直达 + 哈希链路正确。
+    if bytes(prepared.content) != content:
+        return False
+    for token in phone_tokens:
+        box = (token.left, token.top, token.left + token.width, token.top + token.height)
+        if not (0 <= box[0] < box[2] <= 700 and 0 <= box[1] < box[3] <= 200):
             return False
     return True
 

@@ -1,7 +1,40 @@
-import { render, screen } from '@testing-library/react';
-import { expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { expect, it, vi } from 'vitest';
 import { describeOperationDiagnostic, describeOperationError } from '../src/lib/errorMessages';
 import { MaterialWorkspace } from '../src/features/workspace/MaterialWorkspace';
+
+it.each([0, 19])('shows rejected output alongside %s accepted facts and only retries on an explicit click', (count) => {
+  const onProcess = vi.fn();
+  render(<MaterialWorkspace configured busy={false} onAdd={() => {}} onProcess={onProcess} onBack={() => {}}
+    payload={{ analysis: { id: 'a', name: '虚构体检', company_display_name: '虚构企业', status: 'partial' },
+      files: [{ id: 'f', filename: 'synthetic.docx', status: 'partial', progress: 100, detected_kind: 'docx',
+        classified_kind: 'contract', error_code: 'PROCESSING_INCOMPLETE', size_bytes: 20, fact_count: count,
+        needs_reextraction: true, unreceived_count: 2, unreceived: [
+          { reason: 'unsupported_fact_type', index: '19' },
+          { reason: 'invalid_value', index: '20' },
+        ] }] }} />);
+  expect(screen.getByText(/2 项模型输出未接收/)).toBeInTheDocument();
+  expect(screen.getByText(/不支持的事实类型/)).toBeInTheDocument();
+  expect(screen.getByText(/事实值不符合要求/)).toBeInTheDocument();
+  expect(screen.getByText(/不能据此判断没有风险/)).toBeInTheDocument();
+  expect(screen.queryByText(/部分旧版材料/)).toBeNull();
+  expect(onProcess).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: '开始分析' }));
+  expect(onProcess).toHaveBeenCalledTimes(1);
+});
+
+it('keeps historical unreceived warnings visible without offering a retry or echoing unknown reasons', () => {
+  render(<MaterialWorkspace readOnly configured busy={false} onAdd={() => {}} onProcess={() => {}} onBack={() => {}}
+    payload={{ analysis: { id: 'a', name: '虚构历史', company_display_name: '虚构企业', status: 'partial' },
+      files: [{ id: 'f', filename: 'synthetic.docx', status: 'partial', progress: 100, detected_kind: 'docx',
+        classified_kind: 'contract', error_code: null, size_bytes: 20, unreceived_count: 1,
+        unreceived: [{ reason: 'synthetic-private-marker', index: '0' }] }] }} />);
+  expect(screen.getByText(/1 项模型输出未接收/)).toBeInTheDocument();
+  expect(screen.getByText(/输出未通过校验，需人工核对/)).toBeInTheDocument();
+  expect(screen.queryByText(/synthetic-private-marker/)).toBeNull();
+  expect(screen.queryByRole('button', { name: '开始分析' })).toBeNull();
+  expect(screen.queryByText(/可点击.*重试该文件/)).toBeNull();
+});
 
 it('explains a local redaction failure without asking the user to change their API key', () => {
   render(<MaterialWorkspace configured busy={false} onAdd={() => {}} onProcess={() => {}} onBack={() => {}}
@@ -23,6 +56,21 @@ it('renders only the safe provider diagnostic category and bounded fields', () =
   expect(describeOperationDiagnostic({ category: 'json' })).toContain('有效 JSON');
   expect(describeOperationDiagnostic({ category: 'http', status_code: 429, attempt: 2 })).toContain('HTTP 429');
   expect(describeOperationDiagnostic({ category: 'synthetic-secret-marker' })).toBeNull();
+});
+
+it('separates field type errors from conflicts and unsupported types', () => {
+  expect(describeOperationDiagnostic({ category: 'schema', validation_type: 'invalid_type' })).toContain('字段类型不符合约定');
+  expect(describeOperationDiagnostic({ category: 'schema', validation_type: 'conflict' })).toContain('内容矛盾');
+  expect(describeOperationDiagnostic({ category: 'semantic', validation_type: 'unsupported' })).toContain('不可识别');
+  expect(describeOperationDiagnostic({ category: 'schema', validation_type: 'missing_field' })).toContain('缺少必需字段');
+});
+
+it('states the zhipu channel copy without redaction wording', () => {
+  render(<MaterialWorkspace configured busy={false} onAdd={() => {}} onProcess={() => {}} onBack={() => {}}
+    payload={{ analysis: { id: 'a', name: '虚构体检', company_display_name: '虚构企业', status: 'created' },
+      files: [] }} />);
+  expect(screen.getByText(/材料内容将发送至你配置的智谱官方通道/)).toBeInTheDocument();
+  expect(screen.queryByText(/脱敏/)).toBeNull();
 });
 
 it('shows zero extracted facts as an actionable empty result rather than evidence of no risk', () => {

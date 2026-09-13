@@ -20,7 +20,7 @@ from qian_labor.ai.providers import (
     AIProviderError,
     FakeAIProvider,
 )
-from qian_labor.ai.schemas import ExtractionResult, SourceLocator
+from qian_labor.ai.schemas import ExtractionResult, SourceLocator, UsageRecord
 from qian_labor.ai.grounding import (
     EXTRACTION_VERSION,
     MAX_TEXT_CHARACTERS,
@@ -238,13 +238,16 @@ class ProcessingPipeline:
                 uploaded_file.detected_kind = parsed.kind
                 session.commit()
             self._refresh_analysis_progress(analysis_id)
-        return bool(parsed.warnings)
+        with self.database.session() as session:
+            return bool(parsed.warnings or self.unreceived_items(session, analysis_id, file_id))
 
     @classmethod
     def cached_extraction(cls, session, analysis_id, uploaded_file, provider):
         key = cls._job_key(analysis_id, uploaded_file.id, "extract", uploaded_file.sha256)
         job = session.scalar(select(ProcessingJob).where(ProcessingJob.unique_key == key))
         if job is None or job.status != "succeeded":
+            return False
+        if cls.unreceived_items(session, analysis_id, uploaded_file.id):
             return False
         has_facts = session.scalar(select(EmploymentFact.id).where(
             EmploymentFact.analysis_id == analysis_id, EmploymentFact.file_id == uploaded_file.id).limit(1))
@@ -263,6 +266,22 @@ class ProcessingPipeline:
         upgrade_advisory = bool(getattr(provider, "supports_contract_advisory", False)) and (
             advisory_run is None or any(status in {"unreadable", "not_executed"} for status in advisory_run.input_statuses))
         return bool((has_facts or advisory_run) and not upgrade_advisory)
+
+    @staticmethod
+    def unreceived_items(session, analysis_id: str, file_id: str) -> list[dict[str, str]]:
+        """Last committed extraction for this input; failed retries do not erase it."""
+        file = session.get(UploadedFile, file_id)
+        if file is None or file.analysis_id != analysis_id:
+            return []
+        key = ProcessingPipeline._job_key(analysis_id, file_id, "extract", file.sha256)
+        event = session.scalar(select(AuditEvent).where(
+            AuditEvent.analysis_id == analysis_id,
+            AuditEvent.event_type == "extraction_completed",
+            AuditEvent.metadata_json["job_key"].as_string() == key,
+            AuditEvent.metadata_json["file_id"].as_string() == file_id,
+        ).order_by(AuditEvent.metadata_json["attempt"].as_integer().desc(),
+                   AuditEvent.created_at.desc(), AuditEvent.id.desc()).limit(1))
+        return event.metadata_json.get("unreceived", []) if event else []
 
     @staticmethod
     def has_unlocated_sources(session, analysis_id: str, file_id: str) -> bool:
@@ -424,6 +443,9 @@ class ProcessingPipeline:
                 )
                 or 0
             )
+            persisted_calls += sum(max(0, event.metadata_json.get("request_attempts", 1) - 1)
+                for event in session.scalars(select(AuditEvent).where(
+                    AuditEvent.analysis_id == analysis_id, AuditEvent.event_type == "ai_usage_completed")))
         self._refresh_analysis_progress(analysis_id)
 
         inputs = self._extraction_inputs(original_filename, content, parsed)
@@ -462,13 +484,29 @@ class ProcessingPipeline:
         results: list[tuple[ExtractionResult, PreparedProviderInput, list[dict]]] = []
         advisory_grounding = []
         for index, item in enumerate(prepared_inputs):
+            if self._provider_calls >= self.max_provider_calls:
+                raise AIProviderError("AI_CALL_LIMIT_EXCEEDED")
+            if hasattr(self.provider, "max_requests_per_extraction"):
+                self.provider.max_requests_per_extraction = self.max_provider_calls - self._provider_calls
             usage_key = hashlib.sha256(f"{key}:usage:{job_attempt}:{index}".encode()).hexdigest()
             with adapter_call(lambda: self._begin_usage_record(
                     analysis_id, file_id, usage_key, attempt=job_attempt)):
                 self._provider_calls += 1
-                result = self.provider.extract(item.filename, item.content)
+                try:
+                    result = self.provider.extract(item.filename, item.content)
+                except (AIProviderError, ProcessingStopped) as error:
+                    known_usage = getattr(error, "usage", None)
+                    if known_usage is not None:
+                        # Cancellation cannot establish the remote outcome;
+                        # keep known counters without claiming it failed there.
+                        self._complete_usage_record(usage_key, known_usage,
+                            status="unknown" if isinstance(error, ProcessingStopped) else "failed")
+                        self._provider_calls += max(0, known_usage.attempts - 1)
+                        self._estimated_cost_usd += known_usage.estimated_cost_usd
+                    raise
                 # Returned usage remains durable even when cancellation discards facts.
-                self._complete_usage_record(usage_key, result)
+                self._complete_usage_record(usage_key, result.usage)
+                self._provider_calls += max(0, result.usage.attempts - 1)
             checkpoint()
             context = inputs[index]
             if item.ocr_blocks:
@@ -501,8 +539,11 @@ class ProcessingPipeline:
                 raise AIProviderError("AI_BUDGET_EXCEEDED")
             results.append((result, item, grounding))
 
-        if not any(result.facts or result.contract_advisory is not None for result, _, _ in results):
+        if not any(result.facts or result.unreceived or result.contract_advisory is not None for result, _, _ in results):
             raise AIProviderError("AI_NO_SUPPORTED_FACTS")
+
+        unreceived = [entry for result, _, _ in results for entry in result.unreceived]
+        incomplete = bool(parsed.warnings or unreceived)
 
         with commit_boundary(), self.database.session() as session:
             uploaded_file = session.get(UploadedFile, file_id)
@@ -516,18 +557,22 @@ class ProcessingPipeline:
                                                        selected_sources=selected_sources))
             from qian_labor.services.contract_advisory import persist_run
             persist_run(session, analysis_id, uploaded_file, f"{key}:attempt:{job_attempt}", results, advisory_grounding, assignments,
-                        has_warnings=bool(parsed.warnings))
+                        has_warnings=incomplete)
             document_types = [result.document_type for result, _, _ in results]
             uploaded_file.classified_kind = next(
                 (kind for kind in document_types if kind != "other"),
                 document_types[0] if document_types else "other",
             )
-            uploaded_file.status = "partial" if parsed.warnings else "processed"
-            uploaded_file.error_code = "PROCESSING_INCOMPLETE" if parsed.warnings else None
+            uploaded_file.status = "partial" if incomplete else "processed"
+            uploaded_file.error_code = "PROCESSING_INCOMPLETE" if incomplete else None
             uploaded_file.progress = 100
             uploaded_file.detected_kind = parsed.kind
             job.status = "succeeded"
             job.completed_at = datetime.now(UTC)
+            session.add(AuditEvent(analysis_id=analysis_id, event_type="extraction_completed", metadata_json={
+                "file_id": file_id, "job_key": key, "attempt": job_attempt,
+                "unreceived_count": len(unreceived), "unreceived": unreceived,
+            }))
             if uploaded_file.extension.lower() in {".xlsx", ".xls"}:
                 session.add(AuditEvent(analysis_id=analysis_id,
                     event_type="extraction_grounding_completed", metadata_json={
@@ -571,18 +616,23 @@ class ProcessingPipeline:
             )
             session.commit()
 
-    def _complete_usage_record(self, idempotency_key: str, result: ExtractionResult) -> None:
+    def _complete_usage_record(self, idempotency_key: str, result: UsageRecord, *, status: str = "succeeded") -> None:
         with self.database.session() as session:
             usage = session.scalar(
                 select(AIUsageRecord).where(AIUsageRecord.idempotency_key == idempotency_key)
             )
             if usage is None:
                 raise RuntimeError("AI_USAGE_RECORD_MISSING")
-            usage.input_units = result.usage.input_tokens
-            usage.output_units = result.usage.output_tokens
-            usage.estimated_cost_usd = result.usage.estimated_cost_usd
-            usage.latency_ms = result.usage.latency_ms
-            usage.status = "succeeded"
+            if usage.status != "running":
+                return
+            usage.input_units = result.input_tokens
+            usage.output_units = result.output_tokens
+            usage.estimated_cost_usd = result.estimated_cost_usd
+            usage.latency_ms = result.latency_ms
+            usage.status = status
+            session.add(AuditEvent(analysis_id=usage.analysis_id, event_type="ai_usage_completed", metadata_json={
+                "file_id": usage.file_id, "usage_id": usage.id, "request_attempts": max(1, result.attempts),
+            }))
             session.commit()
 
     @staticmethod
@@ -843,6 +893,8 @@ class ProcessingPipeline:
         grounding: list[dict] | None = None,
         selected_sources: list | None = None,
     ) -> tuple:
+        if not result.facts and result.contract_advisory is None:
+            return None, []
         evidence = prepared.identifier_evidence if prepared else ()
         local_hashes = prepared.identifier_hashes if prepared else {}
         hash_values = self._hash_values(evidence, local_hashes)

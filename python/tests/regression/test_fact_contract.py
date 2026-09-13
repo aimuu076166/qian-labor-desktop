@@ -96,5 +96,6 @@ def test_zhipu_rejects_unknown_fact_type_even_when_json_schema_shape_is_valid() 
         privacy_boundary=PrivacyBoundary(PEPPER),
     )
 
-    with pytest.raises(AIProviderError, match="AI_SCHEMA_INVALID"):
-        provider.extract("虚构合同.txt", b"fictional contract")
+    result = provider.extract("虚构合同.txt", b"fictional contract")
+    assert result.facts == []
+    assert result.unreceived == [{"reason": "unsupported_fact_type", "index": "0"}]

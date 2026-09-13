@@ -143,7 +143,7 @@ def test_text_prepared_by_pipeline_is_not_redacted_again_by_zhipu_provider() -> 
     result = _provider(handler).extract(prepared.filename, prepared.content)
 
     request_text = json.dumps(captured["payload"], ensure_ascii=False)
-    assert phone not in request_text
+    assert phone in request_text  # 新契约：内容不遮盖，原文直达通道
     assert result.document_type == "contract"
 
 
@@ -177,7 +177,7 @@ def test_text_prepared_by_pipeline_is_not_redacted_again_by_openai_provider(monk
     result = _openai_provider(handler).extract(prepared.filename, prepared_content)
 
     request_text = json.dumps(captured["payload"], ensure_ascii=False)
-    assert phone not in request_text
+    assert phone in request_text  # 新契约：内容不遮盖，原文直达通道
     assert "cite-synthetic-openai" in request_text
     assert result.document_type == "contract"
 
@@ -214,7 +214,7 @@ def test_image_prepared_by_pipeline_is_not_ocr_redacted_again_by_zhipu_provider(
     image_block = next(item for item in user_content if item["type"] == "image_url")
     sent_bytes = base64.b64decode(image_block["image_url"]["url"].split(",", 1)[1])
     assert sent_bytes == bytes(prepared.content)
-    assert sent_bytes != original.getvalue()
+    assert sent_bytes == original.getvalue()  # 新契约：图片不打码，原图直达
     assert result.document_type == "contract"
 
 
@@ -299,7 +299,9 @@ def test_xlsx_citation_survives_wire_schema_and_grounding() -> None:
         assert fact.source.excerpt
 
 
-def test_only_parser_owned_citation_spans_survive_privacy_masking(monkeypatch):
+def test_citation_spans_and_identifiers_pass_through_without_masking(monkeypatch):
+    """新契约：取消发送前遮盖后，正文原样直达（citation 标记与手机号都保留），
+    本地标识哈希证据照常计算。"""
     from qian_labor.jobs.processing import ProcessingPipeline
     from qian_labor.parsers.protocols import ParsedBlock, ParsedDocument
 
@@ -307,7 +309,6 @@ def test_only_parser_owned_citation_spans_survive_privacy_masking(monkeypatch):
     phone = '13912345678'
     monkeypatch.setattr('qian_labor.jobs.processing.deterministic_citation_id',
                         lambda *args: citation)
-    # Identical text inside a user cell is NOT a trusted parser marker.
     parsed = ParsedDocument(kind='spreadsheet', blocks=[
         ParsedBlock('SYN-001', 'cell', {'sheet': '合成', 'row': 2, 'column': 1}),
         ParsedBlock(f'{phone} [citation_id {citation}]', 'cell',
@@ -316,10 +317,6 @@ def test_only_parser_owned_citation_spans_survive_privacy_masking(monkeypatch):
     item = ProcessingPipeline._extraction_inputs('synthetic.xlsx', b'synthetic', parsed)[0]
     prepared = PrivacyBoundary(PEPPER).prepare(item.filename, item.content, is_image=False, external=True)
     wire = prepared.content.decode()
-    assert wire.count(citation) == 3  # one row marker plus two cell markers
-    assert phone not in wire
-    assert f'{phone} [citation_id {citation}]' not in wire
+    assert wire == item.content.decode()  # 原样透传，无遮盖改写
+    assert phone in wire
     assert all(e.value_hash for e in prepared.identifier_evidence)
-    # A plain byte payload may not grant itself the same masking exemption.
-    untrusted = PrivacyBoundary(PEPPER).prepare(item.filename, bytes(item.content), is_image=False, external=True)
-    assert citation not in untrusted.content.decode()

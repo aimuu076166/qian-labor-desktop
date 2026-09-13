@@ -65,6 +65,8 @@ def workspace_router(database: Database) -> APIRouter:
                 return saved[1] if saved and saved[0] == error_code else None
             warnings = dict(session.execute(select(ParsedDocument.file_id, ParsedDocument.warnings).join(
                 UploadedFile, UploadedFile.id == ParsedDocument.file_id).where(UploadedFile.analysis_id == analysis_id)).all())
+            files = list(files)
+            unreceived = {item.id: ProcessingPipeline.unreceived_items(session, analysis_id, item.id) for item in files}
             return {"analysis": AnalysisService.payload(analysis), "files": [{
                 "id": item.id, "filename": display_filename(item.original_filename),
                 "status": item.status, "progress": item.progress,
@@ -76,9 +78,10 @@ def workspace_router(database: Database) -> APIRouter:
                 "advisory_status": advisory_runs[item.id].execution_status if item.id in advisory_runs else "not_executed",
                 "fact_count": display_fact_counts.get(item.id, 0), "size_bytes": item.size_bytes,
                 "warnings": [w for w in warnings.get(item.id, []) if w in {"embedded_images_need_vision", "empty_csv"}],
+                "unreceived_count": len(unreceived[item.id]), "unreceived": unreceived[item.id],
                 "extraction_version": EXTRACTION_VERSION if ProcessingPipeline._job_key(analysis_id, item.id, "extract", item.sha256) in succeeded else None,
                 "needs_reextraction": (item.id in previously_extracted or item.status in {"processed", "partial"}) and
-                    (ProcessingPipeline._job_key(analysis_id, item.id, "extract", item.sha256) not in succeeded
+                    (bool(unreceived[item.id]) or ProcessingPipeline._job_key(analysis_id, item.id, "extract", item.sha256) not in succeeded
                      or item.extension.lower() in {".xlsx", ".xls"} and
                         ProcessingPipeline.has_unlocated_sources(session, analysis_id, item.id)),
             } for item in files]}

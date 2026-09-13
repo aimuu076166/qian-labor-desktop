@@ -12,6 +12,7 @@ import {
   type EmployeeLedgerPayload,
 } from './features/employees/EmployeeLedger';
 import { EmployeeWorkspace } from './features/employees/EmployeeWorkspace';
+import { EmployeeDisplayName } from './features/employees/EmployeeDisplayName';
 import { EmployeeFactWorkbench, type AssessmentDecisionDrafts, type AssessmentDecisionRequests,
   type FactRevisionDrafts, type FactRevisionRequests, type ReevaluationRequests } from './features/employees/EmployeeFactWorkbench';
 import { FindingDetail, type FindingDetailData, type FindingReviewInput } from './features/findings/FindingDetail';
@@ -858,6 +859,9 @@ export function App({
   } else if (view.kind === 'company-employee' && record) {
     content = <section>
       <p>员工档案 · {record.lifecycle_status === 'archived' ? '已归档' : '使用中'}</p>
+      {api && company.companyId ? <EmployeeDisplayName key={`${record.id}:${record.version}`}
+        name={record.masked_name} version={record.version} companyId={company.companyId} recordId={record.id}
+        api={api} disabled={analysisRunning} onSaved={() => { void company.refresh(); void openRecord(record.id, false); }} /> : null}
       {!employee ? <h2>{record.masked_name}</h2> : null}
       <p>当前材料关联：{record.current_binding ? record.current_binding.analysis_id : '待补材料'}</p>
       {company.current.data?.current_analysis?.stale && record.current_binding ? <p>当前材料尚待完成分析；下列已保存事项尚未按最新材料更新。</p> : null}
